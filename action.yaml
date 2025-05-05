@@ -7,13 +7,19 @@ name: '⛔️ Standalone Linting Action'
 description: 'Runs linting tools that do NOT run under pre-commit.ci'
 
 inputs:
+  # Optional
   config_url:
-    description: 'Download location for standalone linting configuration file'
+    description: 'Download URL for pre-commit linting configuration file'
     type: 'string'
     required: false
-    # Once initial code merged, swap to a subset of linting checks
-    # yamllint disable-line rule:line-length
-    default: 'https://raw.githubusercontent.com/lfreleng-actions/standalone-linting-action/refs/heads/main/.pre-commit-config.yaml'
+  dependencies_url:
+    description: 'Download location for additional Python dependencies'
+    type: 'string'
+    required: false
+  branch_name:
+    # Prevents linting errors that mandate changes be made on a branch
+    description: 'Checkout this branch name prior to running linting'
+    type: 'string'
   path_prefix:
     description: 'Directory location containing project code'
     required: false
@@ -24,16 +30,6 @@ inputs:
     type: 'boolean'
     required: false
     default: false
-  dependencies_url:
-    description: 'Download location for additional Python dependencies'
-    type: 'string'
-    required: false
-  remote_config:
-    # yamllint disable-line rule:line-length
-    description: 'Ignore local linting configuration; always install from remote'
-    type: 'string'
-    required: false
-    default: true
   python-version:
     # Only used when pyproject.toml file not present
     description: 'Python version used to run pre-commit hooks'
@@ -92,23 +88,6 @@ runs:
         # Install pre-commit
         pip install --disable-pip-version-check pre-commit
 
-    - name: 'Check for local linting configuration'
-      if: inputs.remote_config != 'true'
-      id: local-precommit-config
-      # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/path-check-action@594fa4a73651e3e869a4829397e878932f7db32c # v0.1.4
-      with:
-        path: ".pre-commit-config.yaml"
-
-    - name: 'Download remote pre-commit configuration'
-      # yamllint disable-line rule:line-length
-      if: steps.local-precommit-config.outputs != 'file' || inputs.remote_config == 'true'
-      # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/url-download-action@ece51fd0f08fd2db2eda53b1acd06c4747336c16 # v0.1.3
-      with:
-        url: "${{ inputs.config_url }}"
-        path: '.pre-commit-config.yaml'
-
     - name: 'Download Python dependencies configuration'
       if: inputs.dependencies_url != ''
       # yamllint disable-line rule:line-length
@@ -124,12 +103,27 @@ runs:
         # Install additional Python dependencies
         pip install --disable-pip-version-check -r /tmp/requirements.txt
 
+    - name: 'Download remote pre-commit configuration'
+      # yamllint disable-line rule:line-length
+      if: inputs.config_url != ''
+      # yamllint disable-line rule:line-length
+      uses: lfreleng-actions/url-download-action@ece51fd0f08fd2db2eda53b1acd06c4747336c16 # v0.1.3
+      with:
+        url: "${{ inputs.config_url }}"
+        # Will overwrite existing file; upstream action uses "wget -O" flag
+        path: '.pre-commit-config.yaml'
+        exit_on_fail: true
+
     - name: 'Validate linting configuration'
       shell: bash
       run: |
         # Validate linting configuration
         if [ "${{ inputs.path_prefix }}" != '.' ]; then
           cd "${{ inputs.path_prefix }}"
+        fi
+        if [ -n "${{ inputs.branch_name }}" ]; then
+          echo "Checking out Git branch: ${{ inputs.branch_name }} 💬"
+          git checkout -b "${{ inputs.branch_name }}"
         fi
         pre-commit validate-config
 
@@ -140,5 +134,4 @@ runs:
         if [ "${{ inputs.path_prefix }}" != '.' ]; then
           cd "${{ inputs.path_prefix }}"
         fi
-        if [ ! -d .mypy_cache ]; then /bin/mkdir .mypy_cache; fi
         pre-commit run -a
