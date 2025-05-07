@@ -13,7 +13,7 @@ inputs:
     required: false
     # Once initial code merged, swap to a subset of linting checks
     # yamllint disable-line rule:line-length
-    default: 'https://raw.githubusercontent.com/lfreleng-actions/standalone-linting-action/refs/heads/main/.pre-commit-config.yaml'
+    default: 'https://raw.githubusercontent.com/lfreleng-actions/standalone-linting-action/refs/heads/main/pre-commit-config.yaml'
   path_prefix:
     description: 'Directory location containing project code'
     required: false
