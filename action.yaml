@@ -42,10 +42,12 @@ runs:
     - name: 'Check path_prefix directory'
       if: inputs.path_prefix != '.'
       shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
       run: |
-        if [ ! -d "${{ inputs.path_prefix }}" ]; then
+        if [ ! -d "$INPUT_PATH_PREFIX" ]; then
           echo 'Error: path_prefix is not a valid directory ❌'
-          echo "${{ inputs.path_prefix }}"
+          echo "$INPUT_PATH_PREFIX"
           exit 1
         fi
 
@@ -110,22 +112,27 @@ runs:
 
     - name: 'Validate linting configuration'
       shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
       run: |
         # Validate linting configuration
-        if [ "${{ inputs.path_prefix }}" != '.' ]; then
-          cd "${{ inputs.path_prefix }}"
+        if [ "$INPUT_PATH_PREFIX" != '.' ]; then
+          cd "$INPUT_PATH_PREFIX"
         fi
-        if [ -n "${{ inputs.branch_name }}" ]; then
-          echo "Checking out Git branch: ${{ inputs.branch_name }} 💬"
-          git checkout -b "${{ inputs.branch_name }}"
+        if [ -n "$INPUT_BRANCH_NAME" ]; then
+          echo "Checking out Git branch: $INPUT_BRANCH_NAME 💬"
+          git checkout -b "$INPUT_BRANCH_NAME"
         fi
         pre-commit validate-config
 
     - name: 'Run all pre-commit hooks'
       shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
       run: |
         # Run all pre-commit hooks
-        if [ "${{ inputs.path_prefix }}" != '.' ]; then
-          cd "${{ inputs.path_prefix }}"
+        if [ "$INPUT_PATH_PREFIX" != '.' ]; then
+          cd "$INPUT_PATH_PREFIX"
         fi
         pre-commit run -a
