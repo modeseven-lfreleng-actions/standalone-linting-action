@@ -31,7 +31,7 @@ jobs:
 <!-- markdownlint-disable MD013 -->
 
 | Variable Name    | Required | Description                                                | Default |
-| ---------------- | -------- | ---------------------------------------------------------- | --------|
+| ---------------- | -------- | ---------------------------------------------------------- | ------- |
 | config_url       | False    | Download location for pre-commit configuration             |         |
 | dependencies_url | False    | Download location for supplementary Python dependencies    | None    |
 | branch_name      | False    | Checkout this new Git branch before running linting checks | None    |
@@ -39,8 +39,8 @@ jobs:
 | no_checkout      | False    | Don't perform a checkout of the local repository           | false   |
 | python-version   | False    | Python version used to run linting tools                   | 3.12    |
 
+<!-- markdownlint-enable MD013 -->
+
 Caution: dash NOT underscore in python-version input/name
 
 (This maintains alignment with other common actions, e.g. actions/setup-python)
-
-<!-- markdownlint-enable MD013 -->
