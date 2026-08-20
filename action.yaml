@@ -3,33 +3,119 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # standalone-linting-action
+#
+# Runs pre-commit hooks with prek <https://github.com/j178/prek>,
+# standalone from pre-commit.ci. The primary use case is hooks that
+# pre-commit.ci cannot run: hooks needing network access at scan time,
+# or hooks whose environments exceed the pre-commit.ci size limits.
+#
+# Default behaviour (no inputs): parse the repository's
+# .pre-commit-config.yaml, take the hook ids listed under 'ci.skip',
+# and run exactly those hooks. When 'ci.skip' is empty or absent the
+# action succeeds without running anything.
+#
+# Other modes:
+#   * hooks: '<ids>'        run an explicit subset of hooks
+#   * run_all_hooks: 'true' run every hook in the configuration
+#   * config_path/config_url select an alternate configuration file,
+#     which runs in full unless 'hooks' names a subset
+#
+# Security posture:
+#   * No secrets required; an optional github_token is only exported
+#     to hooks that need authenticated API access.
+#   * All variable data reaches shell steps through 'env', never
+#     through expression interpolation inside 'run' blocks.
+#   * Hook ids are allow-listed to [A-Za-z0-9._-], so a configuration
+#     cannot smuggle shell metacharacters onto the prek command line.
+#   * config_path is confined to the workspace or the runner temp
+#     directory (symlink escapes rejected via realpath).
+#   * config_url must be HTTPS, downloads to a private mktemp
+#     directory (never overwriting repository files, and never a
+#     predictable path a symlink could redirect), is size- and
+#     time-capped, and supports sha256 integrity pinning.
+#     (never overwriting repository files), is size- and time-capped,
+#     and supports sha256 integrity pinning.
 name: '⛔️ Standalone Linting Action'
-description: 'Runs linting tools that do NOT run under pre-commit.ci'
+description: 'Runs pre-commit linting hooks with prek, outside pre-commit.ci'
 
 inputs:
   # Optional
+  hooks:
+    description: >-
+      Space or comma separated hook ids to run from the configuration.
+      Hook ids must match [A-Za-z0-9._-]; the action rejects anything
+      else rather than pass it to a shell. Empty selects the default
+      mode: run the hooks listed under 'ci.skip' in the configuration
+      file.
+    required: false
+    default: ''
+  run_all_hooks:
+    description: >-
+      Set 'true' to run every hook in the configuration file.
+      Mutually exclusive with the hooks input. Supplying config_path
+      or config_url implies this.
+    required: false
+    default: 'false'
+  config_path:
+    description: >-
+      Path to the pre-commit configuration file. Relative paths
+      resolve inside the repository workspace; absolute paths must
+      live under the runner temp directory (for configurations staged
+      by an orchestrating workflow). Empty uses
+      <path_prefix>/.pre-commit-config.yaml. Implies run_all_hooks
+      unless the hooks input names a subset.
+    required: false
+    default: ''
   config_url:
-    description: 'Download URL for pre-commit linting configuration file'
+    description: >-
+      HTTPS download URL for the pre-commit configuration file.
+      Downloaded to a private directory under the runner temp
+      directory; never overwrites repository files. Mutually
+      exclusive with config_path. Implies run_all_hooks unless the
+      hooks input names a subset.
     required: false
-  dependencies_url:
-    description: 'Download location for additional Python dependencies'
+    default: ''
+  config_sha256:
+    description: >-
+      Expected SHA-256 checksum of the file fetched from config_url.
+      Strongly recommended whenever config_url is set.
     required: false
-  branch_name:
-    # Prevents linting errors that mandate changes be made on a branch
-    description: 'Checkout this branch name prior to running linting'
+    default: ''
   path_prefix:
     description: 'Directory location containing project code'
     required: false
     default: '.'
+  branch_name:
+    # Prevents linting errors that mandate changes be made on a branch
+    description: 'Checkout this branch name prior to running linting'
+    required: false
+    default: ''
   no_checkout:
     description: 'Do not checkout local repository; used for testing'
     required: false
     default: 'false'
-  python-version:
-    # Only used when pyproject.toml file not present
-    description: 'Python version used to run pre-commit hooks'
+  github_token:
+    description: >-
+      Optional token exported to hooks as GITHUB_TOKEN/GH_TOKEN, for
+      linters that call the GitHub API (e.g. gha-workflow-linter).
+      Pass secrets.GITHUB_TOKEN or github.token; never a PAT with
+      broader scope than the job needs.
     required: false
-    default: '3.12'
+    default: ''
+  prek_version:
+    description: 'Version of prek used to run the hooks (X.Y.Z)'
+    required: false
+    default: '0.4.14'
+
+outputs:
+  config_file:
+    description: 'Resolved path of the linting configuration file'
+    value: ${{ steps.resolve.outputs.config_file }}
+  hooks_run:
+    description: >-
+      Space-separated hook ids the action ran; 'all' when
+      run_all_hooks was set; empty when there was nothing to do.
+    value: ${{ steps.resolve.outputs.hooks_label }}
 
 runs:
   using: 'composite'
@@ -41,100 +127,413 @@ runs:
         persist-credentials: false
       if: inputs.no_checkout != 'true'
 
-    - name: 'Check path_prefix directory'
-      if: inputs.path_prefix != '.'
+    - name: 'Validate inputs'
       shell: bash
       env:
-        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
-      run: |
-        if [ ! -d "$INPUT_PATH_PREFIX" ]; then
-          echo 'Error: path_prefix is not a valid directory ❌'
-          echo "$INPUT_PATH_PREFIX"
-          exit 1
-        fi
-
-    - name: 'Cache pip packages'
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    # yamllint disable-line rule:line-length
-    - uses: lfreleng-actions/path-check-action@b51f09959a4a71eff2e2f175bf80400ae8576f63 # v0.2.1
-      id: pyproject-toml
-      with:
-        path: "${{ inputs.path_prefix }}/pyproject.toml"
-
-    - name: 'Set up Python [pyproject.toml]'
-      if: steps.pyproject-toml.outputs.type == 'file'
-      # yamllint disable-line rule:line-length
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-      with:
-        python-version-file: "${{ inputs.path_prefix }}/pyproject.toml"
-
-    - name: "Setup Python ${{ inputs.python-version }}"
-      # yamllint disable-line rule:line-length
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-      with:
-        python-version: "${{ inputs.python-version }}"
-
-    - name: 'Install pre-commit'
-      shell: bash
-      run:
-        # Install pre-commit
-        pip install --disable-pip-version-check pre-commit
-
-    - name: 'Download Python dependencies configuration'
-      if: inputs.dependencies_url != ''
-      # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/url-download-action@77920845b3cef96fac9ef287dcff261b24a12341 # v0.1.5
-      with:
-        url: "${{ inputs.dependencies_url }}"
-        path: '/tmp/requirements.txt'
-
-    - name: 'Install additional Python dependencies'
-      if: inputs.dependencies_url != ''
-      shell: bash
-      run:
-        # Install additional Python dependencies
-        pip install --disable-pip-version-check -r /tmp/requirements.txt
-
-    - name: 'Download remote pre-commit configuration'
-      # yamllint disable-line rule:line-length
-      if: inputs.config_url != ''
-      # yamllint disable-line rule:line-length
-      uses: lfreleng-actions/url-download-action@77920845b3cef96fac9ef287dcff261b24a12341 # v0.1.5
-      with:
-        url: "${{ inputs.config_url }}"
-        # Will overwrite existing file; upstream action uses "wget -O" flag
-        path: '.pre-commit-config.yaml'
-        exit_on_fail: true
-
-    - name: 'Validate linting configuration'
-      shell: bash
-      env:
+        INPUT_HOOKS: ${{ inputs.hooks }}
+        INPUT_RUN_ALL_HOOKS: ${{ inputs.run_all_hooks }}
+        INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+        INPUT_CONFIG_URL: ${{ inputs.config_url }}
+        INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+        INPUT_PREK_VERSION: ${{ inputs.prek_version }}
       run: |
-        # Validate linting configuration
-        if [ "$INPUT_PATH_PREFIX" != '.' ]; then
-          cd "$INPUT_PATH_PREFIX"
+        # Validate inputs
+        set -euo pipefail
+        errors=0
+        err() { echo "::error::$1 ❌"; errors=1; }
+
+        # Reject control characters (notably CR/LF) in every string
+        # input, before any other check.
+        #
+        # Two reasons. First, 'grep -qE ^...$' anchors per LINE, so a
+        # multi-line value whose lines each match slips past the
+        # patterns below. Second, a resolved path carrying a newline
+        # would corrupt the single-line 'name=value' records this
+        # action writes to GITHUB_OUTPUT, truncating a value or
+        # injecting an extra record. A bash pattern match sees the
+        # whole value, so it catches what the line-oriented tools
+        # cannot.
+        check_clean() {
+          # $1=value $2=label
+          if [[ "$1" == *[$'\n\r\t\v\f']* ]]; then
+            err "$2 must not contain control characters"
+            return 1
+          fi
+          return 0
+        }
+
+        check_clean "$INPUT_HOOKS" 'hooks' || true
+        check_clean "$INPUT_CONFIG_PATH" 'config_path' || true
+        check_clean "$INPUT_CONFIG_URL" 'config_url' || true
+        check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
+        check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
+        [ "$errors" -eq 0 ] || exit 1
+
+        case "$INPUT_RUN_ALL_HOOKS" in
+          true|false) ;;
+          *) err "run_all_hooks must be 'true' or 'false'" ;;
+        esac
+        if [ "$INPUT_RUN_ALL_HOOKS" = 'true' ] && [ -n "$INPUT_HOOKS" ]
+        then
+          err 'hooks and run_all_hooks are mutually exclusive'
         fi
+        # Every hook id must START with an alphanumeric. A leading '-'
+        # would otherwise reach the prek command line as an OPTION:
+        # 'prek run --help' prints help and exits 0, so the action
+        # would report a hook as passed without ever running it.
+        #
+        # 'read -ra' splits on IFS WITHOUT pathname expansion. An
+        # unquoted expansion would glob first, so 'hooks: *' would
+        # validate the file names in the checkout rather than the
+        # literal '*' the resolver goes on to use.
+        if [ -n "$INPUT_HOOKS" ]; then
+          read -ra hook_ids <<< "${INPUT_HOOKS//,/ }"
+          for hook_id in "${hook_ids[@]}"; do
+            if ! printf '%s' "$hook_id" |
+              grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              err "invalid hook id: $hook_id"
+            fi
+          done
+        fi
+        if [ -n "$INPUT_CONFIG_PATH" ] && [ -n "$INPUT_CONFIG_URL" ]
+        then
+          err 'config_path and config_url are mutually exclusive'
+        fi
+        if [ -n "$INPUT_CONFIG_URL" ]; then
+          case "$INPUT_CONFIG_URL" in
+            https://?*) ;;
+            *) err 'config_url must be an https:// URL' ;;
+          esac
+          if ! printf '%s' "$INPUT_CONFIG_URL" |
+            grep -qE '^https://[A-Za-z0-9._~:/?#@$&()*+,;=%-]+$'; then
+            err 'config_url contains unsupported characters'
+          fi
+        fi
+        if [ -n "$INPUT_CONFIG_SHA256" ]; then
+          if [ -z "$INPUT_CONFIG_URL" ]; then
+            err 'config_sha256 requires config_url'
+          fi
+          if ! printf '%s' "$INPUT_CONFIG_SHA256" |
+            grep -qE '^[0-9a-fA-F]{64}$'; then
+            err 'config_sha256 must be a 64-character hex digest'
+          fi
+        fi
+        if ! printf '%s' "$INPUT_PREK_VERSION" |
+          grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          err 'prek_version must be a bare X.Y.Z version'
+        fi
+        if [ -n "$INPUT_BRANCH_NAME" ]; then
+          if ! printf '%s' "$INPUT_BRANCH_NAME" |
+            grep -qE '^[A-Za-z0-9._/-]+$'; then
+            err 'branch_name contains unsupported characters'
+          fi
+          case "/$INPUT_BRANCH_NAME/" in
+            */../*) err "branch_name must not contain '..'" ;;
+          esac
+        fi
+
+        # Path containment: reject absolute paths and '..' segments,
+        # then resolve symlinks and confirm the real path stays inside
+        # the permitted root(s).
+        ws=$(realpath -e -- "$GITHUB_WORKSPACE")
+        tmp=$(realpath -e -- "$RUNNER_TEMP")
+
+        case "$INPUT_PATH_PREFIX" in
+          /*) err 'path_prefix must be a relative path' ;;
+          *)
+            case "/$INPUT_PATH_PREFIX/" in
+              */../*) err "path_prefix must not contain '..'" ;;
+              *)
+                if abs=$(realpath -e -- "$ws/$INPUT_PATH_PREFIX" \
+                  2>/dev/null); then
+                  case "$abs" in
+                    "$ws"|"$ws"/*)
+                      if [ ! -d "$abs" ]; then
+                        err 'path_prefix is not a directory'
+                      fi
+                      ;;
+                    *) err 'path_prefix escapes the workspace' ;;
+                  esac
+                else
+                  err "path_prefix is not a valid directory:" \
+                    "$INPUT_PATH_PREFIX"
+                fi
+                ;;
+            esac
+            ;;
+        esac
+
+        if [ -n "$INPUT_CONFIG_PATH" ]; then
+          case "$INPUT_CONFIG_PATH" in
+            /*)
+              # Absolute paths permitted only under the runner temp
+              # directory, for configurations staged by a workflow.
+              if abs=$(realpath -e -- "$INPUT_CONFIG_PATH" \
+                2>/dev/null); then
+                case "$abs" in
+                  "$tmp"/*) ;;
+                  *) err 'absolute config_path must live under' \
+                    'the runner temp directory' ;;
+                esac
+              else
+                err "config_path does not exist: $INPUT_CONFIG_PATH"
+              fi
+              ;;
+            *)
+              case "/$INPUT_CONFIG_PATH/" in
+                */../*) err "config_path must not contain '..'" ;;
+                *)
+                  if abs=$(realpath -e -- "$ws/$INPUT_CONFIG_PATH" \
+                    2>/dev/null); then
+                    case "$abs" in
+                      "$ws"/*) ;;
+                      *) err 'config_path escapes the workspace' ;;
+                    esac
+                  else
+                    err "config_path does not exist:" \
+                      "$INPUT_CONFIG_PATH"
+                  fi
+                  ;;
+              esac
+              ;;
+          esac
+        fi
+
+        [ "$errors" -eq 0 ] || exit 1
+
+    - name: 'Download remote configuration'
+      id: download
+      if: inputs.config_url != ''
+      shell: bash
+      env:
+        INPUT_CONFIG_URL: ${{ inputs.config_url }}
+        INPUT_CONFIG_SHA256: ${{ inputs.config_sha256 }}
+      run: |
+        # Download remote configuration
+        set -euo pipefail
+        # A private directory with an unpredictable name, NOT a fixed
+        # path: 'curl --output' follows an existing symlink, so a
+        # pre-created path could otherwise redirect the write into the
+        # workspace.
+        dir=$(mktemp -d "$RUNNER_TEMP/standalone-linting.XXXXXXXX")
+        chmod 700 "$dir"
+        target="$dir/remote-config.yaml"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+          --location --max-redirs 3 --max-filesize 1048576 \
+          --max-time 60 --output "$target" "$INPUT_CONFIG_URL"
+        if [ -n "$INPUT_CONFIG_SHA256" ]; then
+          digest=$(printf '%s' "$INPUT_CONFIG_SHA256" |
+            tr '[:upper:]' '[:lower:]')
+          echo "$digest  $target" | sha256sum --check --strict -
+          echo 'Remote configuration checksum verified ✅'
+        else
+          echo '::warning::config_url fetched without config_sha256;' \
+            'pin a checksum to guarantee integrity'
+        fi
+        echo "config_file=$target" >> "$GITHUB_OUTPUT"
+
+    - name: 'Set up uv'
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        version: '0.12.4'
+
+    - name: 'Resolve configuration and hooks'
+      id: resolve
+      shell: bash
+      env:
+        INPUT_HOOKS: ${{ inputs.hooks }}
+        INPUT_RUN_ALL_HOOKS: ${{ inputs.run_all_hooks }}
+        INPUT_CONFIG_PATH: ${{ inputs.config_path }}
+        INPUT_CONFIG_URL: ${{ inputs.config_url }}
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        DOWNLOADED_CONFIG: ${{ steps.download.outputs.config_file }}
+      run: |
+        # Resolve configuration and hooks
+        set -euo pipefail
+        if [ -n "$INPUT_CONFIG_URL" ]; then
+          cfg="$DOWNLOADED_CONFIG"
+        elif [ -n "$INPUT_CONFIG_PATH" ]; then
+          case "$INPUT_CONFIG_PATH" in
+            /*) cfg="$INPUT_CONFIG_PATH" ;;
+            *) cfg="$GITHUB_WORKSPACE/$INPUT_CONFIG_PATH" ;;
+          esac
+        else
+          cfg="$GITHUB_WORKSPACE/$INPUT_PATH_PREFIX"
+          cfg="$cfg/.pre-commit-config.yaml"
+        fi
+        if ! cfg=$(realpath -e -- "$cfg"); then
+          echo '::error::No linting configuration file found ❌'
+          exit 1
+        fi
+        # The resolved path goes into a single-line GITHUB_OUTPUT
+        # record. A file name carrying a newline would truncate the
+        # value or inject a further record, so refuse it here rather
+        # than corrupt the step outputs.
+        if [[ "$cfg" == *[$'\n\r']* ]]; then
+          echo '::error::configuration path contains a newline ❌'
+          exit 1
+        fi
+        echo "Linting configuration: $cfg 💬"
+
+        hooks=''
+        run_all='false'
+        run_needed='true'
+        if [ -n "$INPUT_HOOKS" ]; then
+          hooks=$(printf '%s' "$INPUT_HOOKS" | tr ',' ' ' |
+            tr -s ' ' | sed -e 's/^ //' -e 's/ $//')
+        elif [ "$INPUT_RUN_ALL_HOOKS" = 'true' ]; then
+          run_all='true'
+        elif [ -n "$INPUT_CONFIG_URL" ] ||
+          [ -n "$INPUT_CONFIG_PATH" ]; then
+          # An explicitly supplied configuration runs in full. Its
+          # 'ci.skip' describes what pre-commit.ci skips for the
+          # repository that owns it, which says nothing about a
+          # configuration named here on purpose; falling to ci.skip
+          # mode would silently run nothing for most such files.
+          run_all='true'
+          echo 'Explicit configuration supplied; running all hooks 💬'
+        else
+          # Default mode: run the hooks pre-commit.ci skips. Parse
+          # ci.skip and keep only ids the configuration defines.
+          hooks=$(uv run --no-project --with pyyaml==6.0.2 \
+            python - "$cfg" <<'PYEOF'
+        import re
+        import sys
+
+        import yaml
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle) or {}
+        if not isinstance(cfg, dict):
+            sys.exit("configuration is not a YAML mapping")
+        ci_block = cfg.get("ci") or {}
+        skip = ci_block.get("skip") if isinstance(ci_block, dict) else []
+        skip = [str(item) for item in (skip or [])]
+        defined = []
+        for repo in cfg.get("repos") or []:
+            if not isinstance(repo, dict):
+                continue
+            for hook in repo.get("hooks") or []:
+                if isinstance(hook, dict) and hook.get("id"):
+                    defined.append(str(hook["id"]))
+        selected = [item for item in skip if item in defined]
+        for item in selected:
+            # Must start alphanumeric: a leading '-' would reach the
+            # prek command line as an option ('run --help' exits 0),
+            # reporting a pass without running the hook.
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", item):
+                sys.exit(f"invalid hook id in ci.skip: {item!r}")
+        print(" ".join(dict.fromkeys(selected)))
+        PYEOF
+          )
+          if [ -z "$hooks" ]; then
+            run_needed='false'
+            echo '::notice::ci.skip lists no runnable hooks;' \
+              'nothing to do ✅'
+          fi
+        fi
+
+        if [ "$run_all" = 'true' ]; then
+          hooks_label='all'
+        else
+          hooks_label="$hooks"
+        fi
+        config_hash=$(sha256sum "$cfg" | awk '{print $1}')
+        {
+          echo "config_file=$cfg"
+          echo "hooks=$hooks"
+          echo "hooks_label=$hooks_label"
+          echo "run_all=$run_all"
+          echo "run_needed=$run_needed"
+          echo "config_hash=$config_hash"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: 'Cache prek hook environments'
+      if: steps.resolve.outputs.run_needed == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/prek
+        # yamllint disable-line rule:line-length
+        key: prek-${{ runner.os }}-${{ inputs.prek_version }}-${{ steps.resolve.outputs.config_hash }}
+        restore-keys: |
+          prek-${{ runner.os }}-${{ inputs.prek_version }}-
+
+    - name: 'Run linting checks'
+      if: steps.resolve.outputs.run_needed == 'true'
+      shell: bash
+      env:
+        CONFIG_FILE: ${{ steps.resolve.outputs.config_file }}
+        RESOLVED_HOOKS: ${{ steps.resolve.outputs.hooks }}
+        RUN_ALL: ${{ steps.resolve.outputs.run_all }}
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
+        INPUT_PREK_VERSION: ${{ inputs.prek_version }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        # Run linting checks
+        set -euo pipefail
+        # Hooks probing for a token behave better with the variables
+        # absent than empty.
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          unset GITHUB_TOKEN GH_TOKEN
+        fi
+        export PREK_HOME="$HOME/.cache/prek"
+        cd "$INPUT_PATH_PREFIX"
         if [ -n "$INPUT_BRANCH_NAME" ]; then
           echo "Checking out Git branch: $INPUT_BRANCH_NAME 💬"
           git checkout -b "$INPUT_BRANCH_NAME"
         fi
-        pre-commit validate-config
-
-    - name: 'Run all pre-commit hooks'
-      shell: bash
-      env:
-        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
-      run: |
-        # Run all pre-commit hooks
-        if [ "$INPUT_PATH_PREFIX" != '.' ]; then
-          cd "$INPUT_PATH_PREFIX"
+        status=0
+        rows=''
+        if [ "$RUN_ALL" = 'true' ]; then
+          if uvx "prek@$INPUT_PREK_VERSION" run --all-files \
+            --show-diff-on-failure --config "$CONFIG_FILE"; then
+            rows='| all hooks | ✅ |'
+          else
+            rows='| all hooks | ❌ |'
+            status=1
+          fi
+        else
+          read -ra hook_list <<< "$RESOLVED_HOOKS"
+          for hook in "${hook_list[@]}"; do
+            echo "::group::prek run $hook"
+            # '--' terminates option parsing: without it a hook id
+            # beginning '-' would be read as a prek option, and
+            # 'run --help' exits 0, reporting a pass for a hook that
+            # never ran. Validation rejects such ids too; this is the
+            # second of the two locks.
+            if uvx "prek@$INPUT_PREK_VERSION" run --all-files \
+              --show-diff-on-failure --config "$CONFIG_FILE" \
+              -- "$hook"; then
+              rows="$rows| $hook | ✅ |"$'\n'
+            else
+              rows="$rows| $hook | ❌ |"$'\n'
+              status=1
+            fi
+            echo '::endgroup::'
+          done
         fi
-        pre-commit run -a
+        {
+          echo '## ⛔️ Standalone Linting'
+          echo ''
+          echo '| Hook | Result |'
+          echo '| ---- | ------ |'
+          printf '%s' "$rows"
+          echo ''
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit "$status"
+
+    - name: 'Nothing to run'
+      if: steps.resolve.outputs.run_needed != 'true'
+      shell: bash
+      run: |
+        # Nothing to run
+        {
+          echo '## ⛔️ Standalone Linting'
+          echo ''
+          echo 'No hooks to run: ci.skip lists no runnable hooks ✅'
+        } >> "$GITHUB_STEP_SUMMARY"
