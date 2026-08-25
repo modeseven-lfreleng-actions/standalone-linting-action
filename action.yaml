@@ -16,6 +16,9 @@
 #
 # Other modes:
 #   * hooks: '<ids>'        run an explicit subset of hooks
+#   * skip_hooks: '<ids>'   EXCLUDE ids from whichever set runs
+#     (passed to prek as '--skip' under run_all_hooks; subtracted
+#     from the resolved list in per-hook mode)
 #   * run_all_hooks: 'true' run every hook in the configuration
 #   * config_path/config_url select an alternate configuration file,
 #     which runs in full unless 'hooks' names a subset
@@ -27,6 +30,9 @@
 #     through expression interpolation inside 'run' blocks.
 #   * Hook ids are allow-listed to [A-Za-z0-9._-], so a configuration
 #     cannot smuggle shell metacharacters onto the prek command line.
+#     skip_hooks is held to the same rule: '--skip' takes its value as
+#     a separate argument, so there is no '--' terminator to fall back
+#     on there.
 #   * config_path is confined to the workspace or the runner temp
 #     directory (symlink escapes rejected via realpath).
 #   * config_url must be HTTPS, downloads to a private mktemp
@@ -56,6 +62,28 @@ inputs:
       or config_url implies this.
     required: false
     default: 'false'
+  skip_hooks:
+    description: >-
+      Space or comma separated hook ids to EXCLUDE from the run, the
+      inverse of the hooks input. Held to the same id rules. This is
+      how a caller expresses 'run everything except these', which the
+      hooks input cannot: hooks names a subset to include.
+
+      Combines with run_all_hooks (run everything but these) and with
+      hooks (run these, minus any also named here) alike.
+
+      Applied by two mechanisms, because the two modes resolve the
+      hook set in different places. Under run_all_hooks, prek chooses
+      the set, so the ids pass to it as '--skip'. In per-hook mode
+      this action chooses the set, so the ids are subtracted from it
+      here and never reach prek -- which keeps hooks_run reporting
+      what ran rather than what was asked for. Excluding every hook
+      is a no-op in both.
+
+      Prek treats an id that matches no hook as a no-op, so a stale
+      entry weakens the run without failing it; keep the list current.
+    required: false
+    default: ''
   config_path:
     description: >-
       Path to the pre-commit configuration file. Relative paths
@@ -131,6 +159,7 @@ runs:
       shell: bash
       env:
         INPUT_HOOKS: ${{ inputs.hooks }}
+        INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
         INPUT_RUN_ALL_HOOKS: ${{ inputs.run_all_hooks }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_CONFIG_URL: ${{ inputs.config_url }}
@@ -165,6 +194,7 @@ runs:
         }
 
         check_clean "$INPUT_HOOKS" 'hooks' || true
+        check_clean "$INPUT_SKIP_HOOKS" 'skip_hooks' || true
         check_clean "$INPUT_CONFIG_PATH" 'config_path' || true
         check_clean "$INPUT_CONFIG_URL" 'config_url' || true
         check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
@@ -194,6 +224,20 @@ runs:
             if ! printf '%s' "$hook_id" |
               grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
               err "invalid hook id: $hook_id"
+            fi
+          done
+        fi
+        # skip_hooks reaches the same command line, so it is held to
+        # the same rule. A leading '-' here would be read as a prek
+        # option just as readily, and '--skip' takes its value as a
+        # separate argument, so there is no '--' terminator to lean
+        # on for this one.
+        if [ -n "$INPUT_SKIP_HOOKS" ]; then
+          read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
+          for skip_id in "${skip_ids[@]}"; do
+            if ! printf '%s' "$skip_id" |
+              grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+              err "invalid hook id in skip_hooks: $skip_id"
             fi
           done
         fi
@@ -345,10 +389,14 @@ runs:
       shell: bash
       env:
         INPUT_HOOKS: ${{ inputs.hooks }}
+        INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
         INPUT_RUN_ALL_HOOKS: ${{ inputs.run_all_hooks }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_CONFIG_URL: ${{ inputs.config_url }}
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        # Needed by the run-all skip_hooks precheck, which asks
+        # 'prek list' what survives the exclusions.
+        INPUT_PREK_VERSION: ${{ inputs.prek_version }}
         DOWNLOADED_CONFIG: ${{ steps.download.outputs.config_file }}
       run: |
         # Resolve configuration and hooks
@@ -381,6 +429,7 @@ runs:
         hooks=''
         run_all='false'
         run_needed='true'
+        no_work_reason=''
         if [ -n "$INPUT_HOOKS" ]; then
           hooks=$(printf '%s' "$INPUT_HOOKS" | tr ',' ' ' |
             tr -s ' ' | sed -e 's/^ //' -e 's/ $//')
@@ -431,12 +480,100 @@ runs:
           )
           if [ -z "$hooks" ]; then
             run_needed='false'
-            echo '::notice::ci.skip lists no runnable hooks;' \
-              'nothing to do ✅'
+            no_work_reason='ci.skip lists no runnable hooks'
+            echo "::notice::$no_work_reason; nothing to do ✅"
           fi
         fi
 
-        if [ "$run_all" = 'true' ]; then
+        # Subtract the exclusions from the RESOLVED list, before the
+        # label and before the run loop.
+        #
+        # Without this the loop still iterates an excluded id, and
+        # hooks_run still reports it. Measured against prek 0.4.14,
+        # 'prek run --skip b -- b' exits 1 with 'No hooks found after
+        # filtering', so the summary recorded a CROSS and failed the
+        # run for a hook the caller asked to exclude -- while
+        # hooks_run claimed it had run.
+        if [ -n "$INPUT_SKIP_HOOKS" ] && [ "$run_all" != 'true' ] &&
+          [ -n "$hooks" ]; then
+          read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
+          kept=''
+          for hook_id in $hooks; do
+            excluded='false'
+            for skip_id in "${skip_ids[@]}"; do
+              if [ "$hook_id" = "$skip_id" ]; then
+                excluded='true'
+                break
+              fi
+            done
+            if [ "$excluded" = 'false' ]; then
+              kept="${kept:+$kept }$hook_id"
+            fi
+          done
+          hooks="$kept"
+          if [ -z "$hooks" ]; then
+            run_needed='false'
+            no_work_reason='skip_hooks excluded every selected hook'
+            echo "::notice::$no_work_reason; nothing to do ✅"
+          fi
+        fi
+
+        # The same question for run-all mode, where prek resolves the
+        # set rather than this action -- so the emptiness has to be
+        # anticipated instead of observed.
+        #
+        # Excluding every hook is coherent (a caller narrowing a
+        # shared configuration down to nothing for one project), and
+        # the per-hook path above already treats it as a clean no-op.
+        # Left to prek it is not: measured against 0.4.14,
+        #
+        #   $ prek run --all-files --config cfg.yaml \
+        #       --skip always-passes --skip always-fails
+        #   error: No hooks found after filtering with the given
+        #   selectors
+        #   exit=1
+        #
+        # One input would then mean 'nothing to do' in one mode and
+        # 'fail the job' in the other.
+        #
+        # Ask PREK what survives rather than inferring it from the
+        # YAML. An earlier version walked 'repos[].hooks[].id' here,
+        # which is not prek's selection: it ignores a hook 'alias',
+        # which '--skip' matches, so excluding a hook by alias left
+        # this precheck seeing it as remaining and prek seeing
+        # nothing. 'prek list' applies the same selectors 'prek run'
+        # does, and empty output corresponds exactly to the error
+        # above.
+        if [ -n "$INPUT_SKIP_HOOKS" ] && [ "$run_all" = 'true' ]; then
+          read -ra skip_ids <<< "${INPUT_SKIP_HOOKS//,/ }"
+          list_args=()
+          for skip_id in "${skip_ids[@]}"; do
+            list_args+=(--skip "$skip_id")
+          done
+          list_status=0
+          remaining=$(uvx "prek@$INPUT_PREK_VERSION" list \
+            --config "$cfg" \
+            "${list_args[@]+"${list_args[@]}"}") || list_status=$?
+          if [ "$list_status" -eq 0 ] && [ -z "$remaining" ]; then
+            run_needed='false'
+            no_work_reason='skip_hooks excluded every hook in the'
+            no_work_reason="$no_work_reason configuration"
+            echo "::notice::$no_work_reason; nothing to do ✅"
+          fi
+          # A non-zero status is 'could not tell', not 'nothing to
+          # do'. Fall through and let the run report it, rather than
+          # converting a failed query into a green no-op.
+        fi
+
+        if [ "$run_needed" != 'true' ]; then
+          # Nothing ran, so report nothing. The documented contract
+          # for hooks_run is 'empty when there was nothing to do',
+          # and 'all' here would name work that did not happen --
+          # which is what the run-all label would otherwise say once
+          # skip_hooks excluded every hook. The ci.skip no-op path
+          # reaches the same state through an empty $hooks.
+          hooks_label=''
+        elif [ "$run_all" = 'true' ]; then
           hooks_label='all'
         else
           hooks_label="$hooks"
@@ -448,6 +585,7 @@ runs:
           echo "hooks_label=$hooks_label"
           echo "run_all=$run_all"
           echo "run_needed=$run_needed"
+          echo "no_work_reason=$no_work_reason"
           echo "config_hash=$config_hash"
         } >> "$GITHUB_OUTPUT"
 
@@ -467,6 +605,7 @@ runs:
       env:
         CONFIG_FILE: ${{ steps.resolve.outputs.config_file }}
         RESOLVED_HOOKS: ${{ steps.resolve.outputs.hooks }}
+        INPUT_SKIP_HOOKS: ${{ inputs.skip_hooks }}
         RUN_ALL: ${{ steps.resolve.outputs.run_all }}
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
@@ -489,9 +628,42 @@ runs:
         fi
         status=0
         rows=''
+        # '--skip' applies to the run-all path ALONE. In per-hook mode
+        # the resolver has already removed the exclusions from the
+        # list, so the loop never names one.
+        #
+        # Passing it there as well would look like defence in depth
+        # and behave as the opposite. Measured against prek 0.4.14:
+        #
+        #   $ prek run --skip always-fails -- always-fails
+        #   warning: selector `always-fails` did not match any hooks
+        #   error: No hooks found after filtering with the given
+        #   selectors
+        #   exit=1
+        #
+        # So should the filter ever fail, the excluded hook records a
+        # cross and fails the run -- a caller punished for an
+        # exclusion they asked for. Without '--skip' the same bug
+        # over-runs the hook instead, which is visible and safe.
+        #
+        # Built as an ARRAY: a single string would either word-split
+        # unquoted -- taking pathname expansion with it -- or arrive
+        # as one argument when quoted, and prek takes one id per
+        # '--skip'. 'read -ra' splits on IFS without globbing, and
+        # validation has already refused anything outside
+        # [A-Za-z0-9._-] or with a leading '-'.
+        skip_args=()
+        if [ -n "$INPUT_SKIP_HOOKS" ]; then
+          read -ra skip_list <<< "${INPUT_SKIP_HOOKS//,/ }"
+          for skip_id in "${skip_list[@]}"; do
+            skip_args+=(--skip "$skip_id")
+          done
+          echo "Skipping hooks: ${skip_list[*]} 💬"
+        fi
         if [ "$RUN_ALL" = 'true' ]; then
           if uvx "prek@$INPUT_PREK_VERSION" run --all-files \
-            --show-diff-on-failure --config "$CONFIG_FILE"; then
+            --show-diff-on-failure --config "$CONFIG_FILE" \
+            "${skip_args[@]+"${skip_args[@]}"}"; then
             rows='| all hooks | ✅ |'
           else
             rows='| all hooks | ❌ |'
@@ -530,10 +702,19 @@ runs:
     - name: 'Nothing to run'
       if: steps.resolve.outputs.run_needed != 'true'
       shell: bash
+      env:
+        NO_WORK_REASON: ${{ steps.resolve.outputs.no_work_reason }}
       run: |
         # Nothing to run
+        #
+        # The reason travels from the resolver rather than being
+        # assumed here. Three paths reach this step now -- an empty
+        # ci.skip, an explicit subset emptied by skip_hooks, and a
+        # configuration whose every hook skip_hooks excluded -- and a
+        # summary naming ci.skip for the other two sends a caller to
+        # look at a key they never used.
         {
           echo '## ⛔️ Standalone Linting'
           echo ''
-          echo 'No hooks to run: ci.skip lists no runnable hooks ✅'
+          echo "No hooks to run: $NO_WORK_REASON ✅"
         } >> "$GITHUB_STEP_SUMMARY"

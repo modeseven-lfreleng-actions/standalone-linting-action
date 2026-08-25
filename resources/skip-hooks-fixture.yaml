@@ -1,0 +1,35 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture configuration for the skip_hooks tests in testing.yaml.
+#
+# It pairs a hook that always passes with one that always FAILS, so an
+# exclusion test cannot pass by accident. Skipping 'always-fails' has
+# to change the outcome: without a working '--skip' the run fails, and
+# with one it succeeds.
+#
+# An earlier version of that test excluded two hooks which passed
+# anyway, so removing '--skip' altogether produced the same green
+# result -- a fixture asserting nothing about the feature it named.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is none
+# of them. The tests reach it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: always-passes
+        name: 'Always passes'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: always-fails
+        name: 'Always fails'
+        entry: 'false'
+        language: system
+        pass_filenames: false
+        always_run: true

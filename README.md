@@ -65,6 +65,7 @@ Run every hook from a remote configuration, with integrity pinning
 | Variable Name | Required | Description                                                           | Default |
 | ------------- | -------- | --------------------------------------------------------------------- | ------- |
 | hooks         | False    | Space/comma separated hook ids to run; empty runs the ci.skip hooks   |         |
+| skip_hooks    | False    | Space/comma separated hook ids to EXCLUDE from whichever set runs     |         |
 | run_all_hooks | False    | Run every hook in the configuration (exclusive with hooks)            | false   |
 | config_path   | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |         |
 | config_url    | False    | HTTPS download URL for the configuration (exclusive with config_path) |         |
@@ -97,6 +98,32 @@ Mode selection:
    run every hook in the configuration
 3. Neither (default): run the hooks listed under `ci.skip` in the
    configuration; succeed with a notice when the list is empty
+
+`skip_hooks` is orthogonal to all three: it EXCLUDES ids from
+whichever set the mode above selected, and gives the one way to say
+"run everything except these" — `hooks` names a subset to include,
+which cannot express an exclusion.
+
+It applies by two mechanisms, because the two modes resolve the hook
+set in different places:
+
+<!-- markdownlint-disable MD013 -->
+
+| Mode                          | Who chooses the set | How exclusions apply              |
+| ----------------------------- | ------------------- | --------------------------------- |
+| `run_all_hooks`               | prek                | passed through as `--skip`        |
+| `hooks`, or default `ci.skip` | this action         | subtracted from the resolved list |
+
+<!-- markdownlint-enable MD013 -->
+
+The distinction matters for `hooks_run`, which reports what actually
+ran rather than what the caller asked for. Excluding every hook is a
+clean no-op in both modes.
+
+Note that prek treats a `--skip` id matching no hook as a no-op, so a
+stale entry narrows nothing and the run stays green. Unlike `hooks`,
+nothing can catch a typo here: an id absent from the configuration is
+indistinguishable from an exclusion whose hook has since gone.
 
 A configuration named on purpose runs in full. Its `ci.skip` describes
 what pre-commit.ci skips for the repository that owns it, which says
