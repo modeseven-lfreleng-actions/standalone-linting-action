@@ -84,6 +84,93 @@ jobs:
           fi
           echo 'Explicit hook subset ran ✅'
 
+      # skip_hooks is the ONLY way to say "run everything except
+      # these": hooks names a subset to include, which cannot express
+      # an exclusion. This is the shape a caller migrating from
+      # 'pre-commit run --all-files' with SKIP= needs.
+      #
+      # The fixture pairs a passing hook with one that always FAILS,
+      # so the assertion cannot succeed by accident: without a working
+      # '--skip' this step fails.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/run-all]"
+        id: skipped
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          skip_hooks: 'always-fails'
+
+      - name: 'Check the run-all-except case succeeded'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped.outputs.hooks_run }}
+        run: |
+          # Check the run-all-except case succeeded
+          if [ "$HOOKS_RUN" != 'all' ]; then
+            echo 'Error: expected the run-all path ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'run-all with a failing hook excluded passed ✅'
+
+      # The per-hook path invokes prek differently: one call per id.
+      # An excluded id must be removed from the LIST rather than left
+      # in it and passed to '--skip'. Measured against prek 0.4.14,
+      # 'prek run --skip b -- b' exits 1 with 'No hooks found after
+      # filtering', so leaving it in recorded a CROSS and failed the
+      # run for a hook the caller asked to exclude -- while hooks_run
+      # still claimed it had run.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/per-hook]"
+        id: skipped_subset
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, always-fails'
+          skip_hooks: 'always-fails'
+
+      - name: 'Check the excluded hook left the reported set'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_subset.outputs.hooks_run }}
+        run: |
+          # Check the excluded hook left the reported set
+          if [ "$HOOKS_RUN" != 'always-passes' ]; then
+            echo 'Error: hooks_run must report what RAN ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Excluded hook dropped from the run and the report ✅'
+
+      # Excluding EVERY hook is coherent -- narrowing a shared
+      # configuration down to nothing for one project -- and must be a
+      # no-op in both modes. prek left to itself disagrees: it exits 1
+      # with 'No hooks found after filtering', so the action decides
+      # this before invoking it.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Skip hooks/all excluded]"
+        id: skipped_all
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          skip_hooks: 'always-passes, always-fails'
+
+      - name: 'Check excluding every hook is a no-op'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.skipped_all.outputs.hooks_run }}
+        run: |
+          # Check excluding every hook is a no-op
+          if [ -n "$HOOKS_RUN" ]; then
+            echo 'Error: expected no hooks to run ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Excluding every hook succeeded quietly ✅'
+
       # A configuration named on purpose runs in full, so this covers
       # the run-all path even though the remote file has no ci.skip.
       # yamllint disable-line rule:line-length
@@ -232,6 +319,28 @@ jobs:
           hooks: '*'
         continue-on-error: true
 
+      # skip_hooks reaches the same command line as hooks, and
+      # '--skip' takes its value as a SEPARATE argument -- so there is
+      # no '--' terminator to fall back on and validation is the only
+      # lock. A leading '-' must be refused here too.
+      - name: 'Option-shaped id in skip_hooks'
+        id: option_skip
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          skip_hooks: '--help'
+        continue-on-error: true
+
+      - name: 'Glob in skip_hooks'
+        id: glob_skip
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          skip_hooks: '*'
+        continue-on-error: true
+
       - name: 'Error if any rejection case did NOT fail'
         shell: bash
         env:
@@ -240,6 +349,8 @@ jobs:
           BAD_DIGEST: ${{ steps.bad_digest.outcome }}
           OPTION_HOOK: ${{ steps.option_hook.outcome }}
           GLOB_HOOK: ${{ steps.glob_hook.outcome }}
+          OPTION_SKIP: ${{ steps.option_skip.outcome }}
+          GLOB_SKIP: ${{ steps.glob_skip.outcome }}
         run: |
           # Error if any rejection case did NOT fail
           status=0
@@ -248,7 +359,9 @@ jobs:
             "plaintext http config_url:$INSECURE_URL" \
             "mismatched config_sha256:$BAD_DIGEST" \
             "hook id that is a prek option:$OPTION_HOOK" \
-            "glob as a hook id:$GLOB_HOOK"; do
+            "glob as a hook id:$GLOB_HOOK" \
+            "option-shaped id in skip_hooks:$OPTION_SKIP" \
+            "glob in skip_hooks:$GLOB_SKIP"; do
             if [ "${check##*:}" = 'success' ]; then
               echo "Error: ${check%:*} was NOT rejected ❌"
               status=1
