@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 -->
 
-# ⛔️ Standalone Linting Action
+# 🧹 Standalone Linting Action
 
 Runs pre-commit hooks with [prek](https://github.com/j178/prek),
 standalone from pre-commit.ci. The primary use case is hooks that
@@ -20,11 +20,11 @@ configuration, use the `linting.yaml` reusable workflow in
 [lfreleng-actions/generic-workflows](https://github.com/lfreleng-actions/generic-workflows),
 which builds a lint plan and calls this action for each task.
 
-## standalone-linting-action
-
 ## Usage Example
 
 An example workflow job using this action:
+
+<!-- markdownlint-disable MD013 -->
 
 ```yaml
 jobs:
@@ -35,28 +35,33 @@ jobs:
       contents: read
     steps:
       # Runs the hooks listed under ci.skip in .pre-commit-config.yaml
-      - uses: lfreleng-actions/standalone-linting-action@main
+      - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
         with:
           github_token: ${{ github.token }}
 ```
 
-Run an explicit subset of hooks:
+Run an explicit subset of hooks, space or comma separated. Names may
+be a hook's id or its `alias`, and the hooks must run at the
+`pre-commit` or `manual` stage — the action does not reach
+`commit-msg` hooks such as `gitlint`:
 
 ```yaml
-      - uses: lfreleng-actions/standalone-linting-action@main
+      - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
         with:
-          hooks: 'mypy gitlint'
+          hooks: 'gha-workflow-linter mypy'
 ```
 
 Run every hook from a remote configuration, with integrity pinning
 (naming a configuration implies running it in full):
 
 ```yaml
-      - uses: lfreleng-actions/standalone-linting-action@main
+      - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
         with:
           config_url: 'https://example.org/linting/.pre-commit-config.yaml'
           config_sha256: '<sha256 of the configuration file>'
 ```
+
+<!-- markdownlint-enable MD013 -->
 
 ## Inputs
 

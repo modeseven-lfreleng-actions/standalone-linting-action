@@ -45,7 +45,7 @@
 #     cannot redirect where prek installs from today. The flag makes
 #     that a stated property rather than an incidental one, since
 #     nothing in uv's contract promises the asymmetry will hold.
-name: '⛔️ Standalone Linting Action'
+name: '🧹 Standalone Linting Action'
 description: 'Runs pre-commit linting hooks with prek, outside pre-commit.ci'
 
 inputs:
@@ -1087,7 +1087,7 @@ runs:
           done
         fi
         {
-          echo '## ⛔️ Standalone Linting'
+          echo '## 🧹 Standalone Linting'
           echo ''
           echo '| Hook | Result |'
           echo '| ---- | ------ |'
@@ -1116,7 +1116,7 @@ runs:
         # empty the set, so naming one input would misreport the
         # rest.
         {
-          echo '## ⛔️ Standalone Linting'
+          echo '## 🧹 Standalone Linting'
           echo ''
           echo "No hooks to run: $NO_WORK_REASON ✅"
         } >> "$GITHUB_STEP_SUMMARY"
