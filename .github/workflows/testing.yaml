@@ -150,6 +150,86 @@ jobs:
           fi
           echo 'Excluded hook dropped from the run and the report ✅'
 
+      # Both execution shapes over the SAME selection, so the outcome
+      # cannot depend on which one a caller picked.
+      #
+      # The fixture's 'always-fails' is excluded in each, so a mode
+      # that quietly dropped the exclusion would run it and fail the
+      # step rather than merely reporting differently.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Single invocation]"
+        id: single_run
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, twin, always-fails'
+          skip_hooks: 'always-fails, twin-bad'
+
+      - name: 'Check the default ran the whole selection at once'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.single_run.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.single_run.outputs.prek_runs }}
+        run: |
+          # Check the default ran the whole selection at once
+          if [ "$HOOKS_RUN" != 'always-passes twin' ]; then
+            echo 'Error: unexpected reported set ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          # The SHAPE, which hooks_run cannot show: the resolver
+          # produces that, and it names the same set either way, so
+          # an ignored per_hook_runs would leave it unchanged.
+          if [ "$INVOCATIONS" != '1' ]; then
+            echo 'Error: the default must invoke prek once ❌'
+            echo "Got: $INVOCATIONS"
+            exit 1
+          fi
+          echo 'Single invocation ran the selection ✅'
+
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Per-hook runs]"
+        id: per_hook_run
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, twin, always-fails'
+          skip_hooks: 'always-fails, twin-bad'
+          per_hook_runs: true
+
+      - name: 'Check per-hook mode reports the same set'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.per_hook_run.outputs.hooks_run }}
+          SINGLE: ${{ steps.single_run.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.per_hook_run.outputs.prek_runs }}
+          # yamllint disable-line rule:line-length
+          SINGLE_INVOCATIONS: ${{ steps.single_run.outputs.prek_runs }}
+        run: |
+          # Check per-hook mode reports the same set
+          if [ "$HOOKS_RUN" != "$SINGLE" ]; then
+            echo 'Error: the two shapes disagree ❌'
+            echo "per-hook: $HOOKS_RUN"
+            echo "single:   $SINGLE"
+            exit 1
+          fi
+          # Two hooks survive the exclusions, so per-hook mode must
+          # invoke prek twice where the default invoked it once.
+          # Without this the pair of tests passes whether or not
+          # per_hook_runs does anything at all.
+          if [ "$INVOCATIONS" != '2' ]; then
+            echo 'Error: per_hook_runs must invoke prek per hook ❌'
+            echo "Got: $INVOCATIONS"
+            exit 1
+          fi
+          if [ "$INVOCATIONS" = "$SINGLE_INVOCATIONS" ]; then
+            echo 'Error: both modes used the same shape ❌'
+            exit 1
+          fi
+          echo 'Both shapes agree on what ran, and differ in how ✅'
+
       # Excluding by ALIAS must work in the modes that name hooks, not
       # just under run_all_hooks. prek's '--skip' matches an alias, so
       # comparing ids in the action left the hook running while the
@@ -734,6 +814,46 @@ jobs:
           skip_hooks: 'always-fails'
         continue-on-error: true
 
+      # The same undefined id under per_hook_runs, where prek refuses
+      # it one selector at a time. Both modes must reject it, or the
+      # guarantee depends on which shape the caller picked.
+      - name: 'Unknown hook id in per-hook mode'
+        id: unknown_hook_per_hook
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, no-such-hook'
+          per_hook_runs: true
+        continue-on-error: true
+
+      # An undefined id with NO exclusion in play, which is the case
+      # the single-invocation default had to be taught to catch:
+      # prek downgrades an unmatched selector to a warning once
+      # another selector matches, so this combination exits 0 at the
+      # prek level and the action has to refuse it itself.
+      - name: 'Unknown hook id beside a valid one'
+        id: unknown_hook_pair
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes, no-such-hook'
+        continue-on-error: true
+
+      # A value that is neither 'true' nor 'false' must be refused
+      # rather than read as false, which would silently select the
+      # opposite execution shape.
+      - name: 'Non-boolean per_hook_runs'
+        id: bad_per_hook
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          per_hook_runs: 'yes'
+        continue-on-error: true
+
       # A hook id read back OUT of a configuration passes through no
       # allow-list -- prek accepts one spelling a glob. Iterating the
       # listing unquoted expanded it against the checkout, so the
@@ -814,6 +934,9 @@ jobs:
           OPTION_SKIP: ${{ steps.option_skip.outcome }}
           GLOB_SKIP: ${{ steps.glob_skip.outcome }}
           UNKNOWN_HOOK: ${{ steps.unknown_hook.outcome }}
+          UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outcome }}
+          UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outcome }}
+          BAD_PER_HOOK: ${{ steps.bad_per_hook.outcome }}
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
@@ -829,6 +952,9 @@ jobs:
             "option-shaped id in skip_hooks:$OPTION_SKIP" \
             "glob in skip_hooks:$GLOB_SKIP" \
             "unknown hook id alongside skip_hooks:$UNKNOWN_HOOK" \
+            "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
+            "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
+            "non-boolean per_hook_runs:$BAD_PER_HOOK" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
             "prek_version colliding under a radix:$PACKED_PREK"; do

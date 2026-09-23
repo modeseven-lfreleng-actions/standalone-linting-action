@@ -72,6 +72,7 @@ Run every hook from a remote configuration, with integrity pinning
 | hooks         | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip  |         |
 | skip_hooks    | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |         |
 | run_all_hooks | False    | Run every hook in the configuration (exclusive with hooks)            | false   |
+| per_hook_runs | False    | Invoke prek once per hook, for one summary row each                   | false   |
 | config_path   | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |         |
 | config_url    | False    | HTTPS download URL for the configuration (exclusive with config_path) |         |
 | config_sha256 | False    | Expected SHA-256 of the file fetched from config_url                  |         |
@@ -91,6 +92,7 @@ Run every hook from a remote configuration, with integrity pinning
 | ----------- | ----------------------------------------------------------------------- |
 | config_file | Resolved path of the linting configuration file                         |
 | hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op |
+| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op    |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -103,6 +105,39 @@ Mode selection:
    run every hook in the configuration
 3. Neither (default): run the hooks listed under `ci.skip` in the
    configuration; succeed with a notice when the list is empty
+
+### One invocation, or one per hook
+
+A selection runs in a **single** prek invocation by default. prek
+runs hooks concurrently and shares their environments, so a loop pays
+a process start and a configuration parse per hook and buys no
+isolation — measured on four hooks, 418ms looping against 90ms
+combined.
+
+The cost is the job summary, which gets one row for the selection
+rather than one per hook, because a single exit status covers them
+all. prek's own output still names what failed, so this trades the
+table rather than the diagnosis. Set `per_hook_runs: 'true'` to get
+the table back.
+
+One behaviour had to be rebuilt for the default. prek reports a
+selector matching nothing as an **error** when nothing else matches,
+and as a **warning** once another selector does:
+
+```console
+$ prek run ... -- no-such-hook
+error: No hooks found after filtering        # exit 1
+
+$ prek run ... -- always-passes no-such-hook
+warning: selector `no-such-hook` did not match any hooks
+Always passes.........................Passed  # exit 0
+```
+
+The per-hook loop caught a mistyped hook id for free, one selector at
+a time. Collapsing to one invocation would have turned that into a
+green check over a smaller set than the caller asked for, so the
+action now checks the names itself and fails on one the configuration
+does not define. Both modes refuse it.
 
 `skip_hooks` is orthogonal to all three: it EXCLUDES hooks from
 whichever set the mode above selected, naming each by id or by
