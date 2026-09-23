@@ -905,6 +905,37 @@ jobs:
       # '--skip' takes its value as a SEPARATE argument -- so there is
       # no '--' terminator to fall back on and validation is the only
       # lock. A leading '-' must be refused here too.
+      # Both of these reach a line-anchored 'grep', which matches on
+      # any ONE line, so a multi-line value whose first line is valid
+      # slipped past the pattern that follows. Six other string
+      # inputs were already held to the control-character check and
+      # these two were not.
+      - name: 'Multi-line prek_version'
+        id: multiline_prek_version
+        uses: ./
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          # yamllint disable-line rule:line-length
+          prek_version: "0.4.14\njunk"
+        continue-on-error: true
+
+      # A digest carrying a second line builds a second sha256sum
+      # record naming a file nobody asked about. '--strict' refuses
+      # it, so the integrity check already failed closed -- but as
+      # 'FAILED open or read', which says nothing about the input
+      # that was wrong.
+      - name: 'Multi-line config_sha256'
+        id: multiline_sha256
+        uses: ./
+        with:
+          no_checkout: true
+          # yamllint disable-line rule:line-length
+          config_url: 'https://raw.githubusercontent.com/lfreleng-actions/test-python-project/refs/heads/main/resources/pre-commit-config.yaml'
+          # yamllint disable-line rule:line-length
+          config_sha256: "0000000000000000000000000000000000000000000000000000000000000000\n0000000000000000000000000000000000000000000000000000000000000000"
+        continue-on-error: true
+
       - name: 'Option-shaped id in skip_hooks'
         id: option_skip
         uses: ./
@@ -937,6 +968,9 @@ jobs:
           UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outcome }}
           UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outcome }}
           BAD_PER_HOOK: ${{ steps.bad_per_hook.outcome }}
+          # yamllint disable-line rule:line-length
+          MULTILINE_PREK: ${{ steps.multiline_prek_version.outcome }}
+          MULTILINE_SHA: ${{ steps.multiline_sha256.outcome }}
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
@@ -955,6 +989,8 @@ jobs:
             "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
             "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
             "non-boolean per_hook_runs:$BAD_PER_HOOK" \
+            "multi-line prek_version:$MULTILINE_PREK" \
+            "multi-line config_sha256:$MULTILINE_SHA" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
             "prek_version colliding under a radix:$PACKED_PREK"; do

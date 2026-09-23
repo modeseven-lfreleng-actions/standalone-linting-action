@@ -253,6 +253,23 @@ runs:
         check_clean "$INPUT_CONFIG_URL" 'config_url' || true
         check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
         check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
+        # Both of these are validated by a line-anchored 'grep'
+        # below, so both need this first for the reason given above.
+        #
+        # prek_version reaches three places past that check: the
+        # 'uvx prek@...' argument, the 'IFS=. read' that derives the
+        # version floor -- which takes the FIRST line and so passes
+        # on the valid part -- and the actions/cache key, where a
+        # newline has no business at all.
+        #
+        # config_sha256 fails closed today rather than opening a
+        # hole: 'sha256sum --check --strict' refuses a malformed
+        # record. But it refuses it as 'FAILED open or read' against
+        # a filename built from the second line, which tells a caller
+        # nothing about the input they got wrong. Refusing it here
+        # names the input instead.
+        check_clean "$INPUT_PREK_VERSION" 'prek_version' || true
+        check_clean "$INPUT_CONFIG_SHA256" 'config_sha256' || true
         [ "$errors" -eq 0 ] || exit 1
 
         case "$INPUT_RUN_ALL_HOOKS" in
