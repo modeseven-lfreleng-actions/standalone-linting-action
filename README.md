@@ -183,6 +183,24 @@ action drops a hook whose remaining instances sit at `pre-push`,
 such a hook without output at exit 0, and reporting that as a tick
 would claim a check that never ran.
 
+Naming such a hook **fails the run**. Where an exclusion leaves a
+selected hook with no reachable instance the resolver drops it, but a
+hook named directly is a request the action cannot honour, so it says
+so rather than reporting a pass:
+
+<!-- markdownlint-disable MD013 -->
+
+```console
+::error::requested hooks run at no stage this action reaches: msg-check (commit-msg) ❌
+```
+
+<!-- markdownlint-enable MD013 -->
+
+That is the case `gitlint` falls into. Run such hooks in a dedicated
+job until [#143][issue-143] lands.
+
+[issue-143]: https://github.com/lfreleng-actions/standalone-linting-action/issues/143
+
 The distinction matters for `hooks_run`, which reports what ran
 rather than what the caller asked for. Excluding every hook is a
 clean no-op in both modes.

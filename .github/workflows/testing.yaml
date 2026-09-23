@@ -230,6 +230,32 @@ jobs:
           fi
           echo 'Both shapes agree on what ran, and differ in how ✅'
 
+      # The other side of the stage check: a hook declaring no stages
+      # runs, so naming it must still work. Without this the three
+      # rejection cases above could be satisfied by refusing every
+      # selection drawn from that fixture.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Runnable stage]"
+        id: runnable_stage
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook'
+
+      - name: 'Check a runnable hook is still accepted'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.runnable_stage.outputs.hooks_run }}
+        run: |
+          # Check a runnable hook is still accepted
+          if [ "$HOOKS_RUN" != 'ok-hook' ]; then
+            echo 'Error: a reachable hook must still run ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          echo 'Reachable hook accepted and run ✅'
+
       # Excluding by ALIAS must work in the modes that name hooks, not
       # just under run_all_hooks. prek's '--skip' matches an alias, so
       # comparing ids in the action left the hook running while the
@@ -936,6 +962,45 @@ jobs:
           config_sha256: "0000000000000000000000000000000000000000000000000000000000000000\n0000000000000000000000000000000000000000000000000000000000000000"
         continue-on-error: true
 
+      # A hook at a stage no run reaches, named directly. prek exits
+      # 0 having printed nothing, so the action used to record a
+      # tick for it. The fixture's entry is 'false', so a pass here
+      # could only ever mean the hook did not run.
+      #
+      # Both shapes, because neither noticed: the per-hook loop gets
+      # prek's refusal for an UNDEFINED id but not for an unreachable
+      # stage.
+      - name: 'Unreachable stage, single invocation'
+        id: unreachable_single
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+        continue-on-error: true
+
+      - name: 'Unreachable stage, per-hook runs'
+        id: unreachable_per_hook
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+          per_hook_runs: true
+        continue-on-error: true
+
+      # Named beside a runnable hook, which is how a real
+      # configuration meets this: the selection must be refused, not
+      # quietly narrowed to the part that works.
+      - name: 'Unreachable stage beside a runnable hook'
+        id: unreachable_pair
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook, msg-check'
+        continue-on-error: true
+
       - name: 'Option-shaped id in skip_hooks'
         id: option_skip
         uses: ./
@@ -971,6 +1036,9 @@ jobs:
           # yamllint disable-line rule:line-length
           MULTILINE_PREK: ${{ steps.multiline_prek_version.outcome }}
           MULTILINE_SHA: ${{ steps.multiline_sha256.outcome }}
+          UNREACHABLE_ONE: ${{ steps.unreachable_single.outcome }}
+          UNREACHABLE_PER: ${{ steps.unreachable_per_hook.outcome }}
+          UNREACHABLE_PAIR: ${{ steps.unreachable_pair.outcome }}
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
@@ -991,6 +1059,9 @@ jobs:
             "non-boolean per_hook_runs:$BAD_PER_HOOK" \
             "multi-line prek_version:$MULTILINE_PREK" \
             "multi-line config_sha256:$MULTILINE_SHA" \
+            "unreachable stage, single:$UNREACHABLE_ONE" \
+            "unreachable stage, per-hook:$UNREACHABLE_PER" \
+            "unreachable stage beside a runnable:$UNREACHABLE_PAIR" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
             "prek_version colliding under a radix:$PACKED_PREK"; do
