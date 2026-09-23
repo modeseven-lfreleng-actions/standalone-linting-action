@@ -1001,6 +1001,50 @@ jobs:
           hooks: 'ok-hook, msg-check'
         continue-on-error: true
 
+      # The same request with an exclusion that matches nothing in
+      # the configuration. Any exclusion used to engage the resolver,
+      # which counted every name missing from the stage-filtered
+      # listing as excluded -- so a stale skip_hooks entry, or an
+      # ambient SKIP, turned a refused selection back into a green
+      # no-op. Only an exclusion that removed an instance may drop a
+      # name; this one removed nothing.
+      - name: 'Unreachable stage beside a stale exclusion'
+        id: unreachable_stale_skip
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'msg-check'
+          skip_hooks: 'no-such-exclusion'
+        continue-on-error: true
+
+      # And paired with a runnable hook, where the old rule narrowed
+      # the selection to 'ok-hook' and passed.
+      - name: 'Unreachable stage and a runnable hook, stale exclusion'
+        id: unreachable_stale_pair
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-stage-fixture.yaml'
+          hooks: 'ok-hook, msg-check'
+          skip_hooks: 'no-such-exclusion'
+        continue-on-error: true
+
+      # Two unreachable hooks sharing an id, one excluded by alias.
+      # The survivor is still selected and cannot run, so this is a
+      # refusal -- unlike [Skip hooks/hook stages], where the
+      # excluded twin was the runnable one and a quiet no-op is
+      # right. See resources/unreachable-twin-fixture.yaml.
+      - name: 'Unreachable twin left by an alias exclusion'
+        id: unreachable_twin
+        uses: ./
+        with:
+          no_checkout: true
+          config_path: 'resources/unreachable-twin-fixture.yaml'
+          hooks: 'dup'
+          skip_hooks: 'dup-a'
+        continue-on-error: true
+
       - name: 'Option-shaped id in skip_hooks'
         id: option_skip
         uses: ./
@@ -1039,6 +1083,11 @@ jobs:
           UNREACHABLE_ONE: ${{ steps.unreachable_single.outcome }}
           UNREACHABLE_PER: ${{ steps.unreachable_per_hook.outcome }}
           UNREACHABLE_PAIR: ${{ steps.unreachable_pair.outcome }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE: ${{ steps.unreachable_stale_skip.outcome }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE_PAIR: ${{ steps.unreachable_stale_pair.outcome }}
+          UNREACHABLE_TWIN: ${{ steps.unreachable_twin.outcome }}
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
@@ -1062,6 +1111,9 @@ jobs:
             "unreachable stage, single:$UNREACHABLE_ONE" \
             "unreachable stage, per-hook:$UNREACHABLE_PER" \
             "unreachable stage beside a runnable:$UNREACHABLE_PAIR" \
+            "unreachable stage, stale exclusion:$UNREACHABLE_STALE" \
+            "unreachable pair, stale exclusion:$UNREACHABLE_STALE_PAIR" \
+            "unreachable twin, one excluded:$UNREACHABLE_TWIN" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
             "prek_version colliding under a radix:$PACKED_PREK"; do
@@ -1072,3 +1124,49 @@ jobs:
           done
           [ "$status" -eq 0 ] || exit 1
           echo 'All rejection cases failed as expected ✅'
+
+      # Failing is half the contract. hooks_run reports what RAN, and
+      # the preflight refuses these before prek runs anything, so each
+      # must report nothing. For the stale-exclusion and twin cases this
+      # also pins WHERE they failed: the old resolver dropped the
+      # name and the lint step never ran, which reads as an empty
+      # hooks_run too -- but as a success, which the aggregate above
+      # refuses. It used to echo the resolver's label, so
+      # a caller using continue-on-error read 'msg-check' as run.
+      - name: 'Check refused selections report no hooks run'
+        shell: bash
+        env:
+          UNKNOWN_HOOK: ${{ steps.unknown_hook.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outputs.hooks_run }}
+          UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outputs.hooks_run }}
+          UNREACHABLE_ONE: ${{ steps.unreachable_single.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_PER: ${{ steps.unreachable_per_hook.outputs.hooks_run }}
+          UNREACHABLE_PAIR: ${{ steps.unreachable_pair.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE: ${{ steps.unreachable_stale_skip.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          UNREACHABLE_STALE_PAIR: ${{ steps.unreachable_stale_pair.outputs.hooks_run }}
+          UNREACHABLE_TWIN: ${{ steps.unreachable_twin.outputs.hooks_run }}
+        run: |
+          # Check refused selections report no hooks run
+          status=0
+          for check in \
+            "unknown hook id alongside skip_hooks:$UNKNOWN_HOOK" \
+            "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
+            "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
+            "unreachable stage, single:$UNREACHABLE_ONE" \
+            "unreachable stage, per-hook:$UNREACHABLE_PER" \
+            "unreachable stage beside a runnable:$UNREACHABLE_PAIR" \
+            "unreachable stage, stale exclusion:$UNREACHABLE_STALE" \
+            "unreachable pair, stale exclusion:$UNREACHABLE_STALE_PAIR" \
+            "unreachable twin, one excluded:$UNREACHABLE_TWIN"; do
+            if [ -n "${check#*:}" ]; then
+              echo "Error: ${check%%:*} reported hooks_run=" \
+                "'${check#*:}' having run nothing ❌"
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+          echo 'Refused selections report no hooks run ✅'

@@ -88,11 +88,11 @@ Run every hook from a remote configuration, with integrity pinning
 
 <!-- markdownlint-disable MD013 -->
 
-| Output Name | Description                                                             |
-| ----------- | ----------------------------------------------------------------------- |
-| config_file | Resolved path of the linting configuration file                         |
-| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op |
-| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op    |
+| Output Name | Description                                                                        |
+| ----------- | ---------------------------------------------------------------------------------- |
+| config_file | Resolved path of the linting configuration file                                    |
+| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
+| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -203,12 +203,8 @@ job until [#143][issue-143] lands.
 
 The distinction matters for `hooks_run`, which reports what ran
 rather than what the caller asked for. Excluding every hook is a
-clean no-op in both modes.
-
-Stage pruning applies where the resolver runs, which means where an
-exclusion is in play. With no exclusion set, a hook named directly at
-an unreached stage still counts as run; issue #156 tracks closing
-that gap.
+clean no-op in both modes, and a refused selection reports nothing,
+because nothing ran.
 
 Note that prek treats a `--skip` id matching no hook as a no-op, so a
 stale entry narrows nothing and the run stays green. Unlike `hooks`,
