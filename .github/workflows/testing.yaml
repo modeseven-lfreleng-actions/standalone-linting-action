@@ -56,7 +56,7 @@ jobs:
           HOOKS_RUN: ${{ steps.default_mode.outputs.hooks_run }}
         run: |
           # Check default mode selected the ci.skip hooks
-          if [ "$HOOKS_RUN" != 'gha-workflow-linter' ]; then
+          if [ "$HOOKS_RUN" != 'gha-workflow-linter aislop' ]; then
             echo 'Error: expected the ci.skip hook set ❌'
             echo "Got: $HOOKS_RUN"
             exit 1
