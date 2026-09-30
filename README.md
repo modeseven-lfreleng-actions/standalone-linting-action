@@ -18,7 +18,13 @@ action succeeds without running anything.
 To orchestrate parallel matrix jobs across more than one
 configuration, use the `linting.yaml` reusable workflow in
 [lfreleng-actions/generic-workflows](https://github.com/lfreleng-actions/generic-workflows),
-which builds a lint plan and calls this action for each task.
+which builds a lint plan and calls this action for each task. Its
+[input reference](https://github.com/lfreleng-actions/generic-workflows/blob/main/docs/linting.md)
+covers selection, the JSON plan and the security model. Its
+`split_hooks` input (default `true`) divides a selection into one
+matrix job per hook, so each hook reports as its own check. Note that
+the workflow's default differs from this action's: with no inputs it
+runs every hook in the configuration, not the `ci.skip` set.
 
 ## Usage Example
 
