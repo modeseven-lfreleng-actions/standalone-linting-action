@@ -30,6 +30,15 @@ repos:
         # yamllint disable-line rule:line-length
         entry: '^\s*rev:\s*\S+\s+#\s*frozen:(?!\s+v?[0-9]+(\.[0-9]+)*(-[0-9]+)?\s*$)'
         files: '^\.pre-commit-config\.yaml$'
+      - id: validate-inputs-fixtures
+        name: Validate inputs step fixtures
+        entry: tests/test-validate-inputs.sh
+        language: python
+        additional_dependencies: ['pyyaml==6.0.2']
+        pass_filenames: false
+        # The suite extracts the step from action.yaml, so editing
+        # either file runs it.
+        files: '^(action\.yaml|tests/test-validate-inputs\.sh)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
