@@ -237,7 +237,7 @@ jobs:
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Runnable stage]"
         id: runnable_stage
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -938,7 +938,7 @@ jobs:
       # these two were not.
       - name: 'Multi-line prek_version'
         id: multiline_prek_version
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           run_all_hooks: true
@@ -953,7 +953,7 @@ jobs:
       # that was wrong.
       - name: 'Multi-line config_sha256'
         id: multiline_sha256
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           # yamllint disable-line rule:line-length
@@ -972,7 +972,7 @@ jobs:
       # stage.
       - name: 'Unreachable stage, single invocation'
         id: unreachable_single
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -981,7 +981,7 @@ jobs:
 
       - name: 'Unreachable stage, per-hook runs'
         id: unreachable_per_hook
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -994,7 +994,7 @@ jobs:
       # quietly narrowed to the part that works.
       - name: 'Unreachable stage beside a runnable hook'
         id: unreachable_pair
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -1010,7 +1010,7 @@ jobs:
       # name; this one removed nothing.
       - name: 'Unreachable stage beside a stale exclusion'
         id: unreachable_stale_skip
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -1022,7 +1022,7 @@ jobs:
       # the selection to 'ok-hook' and passed.
       - name: 'Unreachable stage and a runnable hook, stale exclusion'
         id: unreachable_stale_pair
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-stage-fixture.yaml'
@@ -1037,7 +1037,7 @@ jobs:
       # right. See resources/unreachable-twin-fixture.yaml.
       - name: 'Unreachable twin left by an alias exclusion'
         id: unreachable_twin
-        uses: ./
+        uses: $/
         with:
           no_checkout: true
           config_path: 'resources/unreachable-twin-fixture.yaml'
