@@ -1063,6 +1063,11 @@ jobs:
           skip_hooks: '*'
         continue-on-error: true
 
+      # An outcome shows THAT a case failed, not WHERE. Where an input
+      # would also break a later step, deleting its guard leaves the
+      # case failing all the same, so tests/test-validate-inputs.sh
+      # pins each case the validate step refuses to that refusal
+      # (standalone-linting-action#171). Add such a case to both.
       - name: 'Error if any rejection case did NOT fail'
         shell: bash
         env:

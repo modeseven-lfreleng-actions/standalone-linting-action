@@ -210,6 +210,9 @@ runs:
       if: inputs.no_checkout != 'true'
 
     - name: 'Validate inputs'
+      # Located by this id in tests/test-validate-inputs.sh, which
+      # runs the step on its own to pin each refusal to its guard.
+      id: validate
       shell: bash
       env:
         INPUT_HOOKS: ${{ inputs.hooks }}
