@@ -1,0 +1,35 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the commit-msg-only test in testing.yaml.
+#
+# Every hook here runs at the commit-msg stage alone, so under
+# run_all_hooks with a commit range the pre-commit stage has nothing
+# to execute. Left to prek, that run would print nothing, exit 0 and
+# record 'all hooks | ✅'; the action must leave it out. Unlike the
+# 'pre-commit excluded' case, no exclusion empties the stage, so the
+# resolver's exclusion precheck never engages.
+#
+# The hooks match resources/commit-msg-fixture.yaml, which describes
+# the history the test runs them over.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The tests reach it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: no-wip
+        name: 'Commit message has no WIP line'
+        entry: '^WIP'
+        language: pygrep
+        stages: [commit-msg]
+
+      - id: author-identity
+        name: 'Runs as the commit author'
+        entry: sh -c 'test "$(git config user.email)" = author@example.com'
+        language: system
+        pass_filenames: false
+        stages: [commit-msg]

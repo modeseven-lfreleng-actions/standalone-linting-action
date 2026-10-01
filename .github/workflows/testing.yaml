@@ -1063,6 +1063,53 @@ jobs:
           skip_hooks: '*'
         continue-on-error: true
 
+      - name: 'Option-shaped side in commit_range'
+        id: bad_commit_range
+        uses: $/
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          commit_range: '--all..HEAD'
+        continue-on-error: true
+
+      # git's symmetric difference: a different set of commits from
+      # the '<from>..<to>' range the input documents.
+      - name: 'Symmetric difference as a commit_range'
+        id: symmetric_commit_range
+        uses: $/
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          commit_range: 'origin/main...main'
+        continue-on-error: true
+
+      - name: 'Chained ranges in commit_range'
+        id: chained_commit_range
+        uses: $/
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          commit_range: 'HEAD~2..HEAD..main'
+        continue-on-error: true
+
+      - name: 'commit_range without a range'
+        id: single_commit_range
+        uses: $/
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          commit_range: 'HEAD'
+        continue-on-error: true
+
+      - name: 'Multi-line commit_range'
+        id: multiline_commit_range
+        uses: $/
+        with:
+          no_checkout: true
+          run_all_hooks: true
+          commit_range: "HEAD~1..HEAD\nHEAD~9..HEAD"
+        continue-on-error: true
+
       # An outcome shows THAT a case failed, not WHERE. Where an input
       # would also break a later step, deleting its guard leaves the
       # case failing all the same, so tests/test-validate-inputs.sh
@@ -1096,6 +1143,13 @@ jobs:
           GLOB_CONFIG: ${{ steps.glob_config.outcome }}
           OLD_PREK: ${{ steps.old_prek.outcome }}
           PACKED_PREK: ${{ steps.packed_prek.outcome }}
+          BAD_COMMIT_RANGE: ${{ steps.bad_commit_range.outcome }}
+          # yamllint disable-line rule:line-length
+          SYMMETRIC_RANGE: ${{ steps.symmetric_commit_range.outcome }}
+          CHAINED_RANGE: ${{ steps.chained_commit_range.outcome }}
+          SINGLE_RANGE: ${{ steps.single_commit_range.outcome }}
+          # yamllint disable-line rule:line-length
+          MULTILINE_RANGE: ${{ steps.multiline_commit_range.outcome }}
         run: |
           # Error if any rejection case did NOT fail
           status=0
@@ -1121,7 +1175,12 @@ jobs:
             "unreachable twin, one excluded:$UNREACHABLE_TWIN" \
             "glob-shaped hook id in the config:$GLOB_CONFIG" \
             "prek_version below the floor:$OLD_PREK" \
-            "prek_version colliding under a radix:$PACKED_PREK"; do
+            "prek_version colliding under a radix:$PACKED_PREK" \
+            "option-shaped side in commit_range:$BAD_COMMIT_RANGE" \
+            "symmetric difference as a commit_range:$SYMMETRIC_RANGE" \
+            "chained ranges in commit_range:$CHAINED_RANGE" \
+            "commit_range without a range:$SINGLE_RANGE" \
+            "multi-line commit_range:$MULTILINE_RANGE"; do
             if [ "${check##*:}" = 'success' ]; then
               echo "Error: ${check%:*} was NOT rejected ❌"
               status=1
@@ -1175,3 +1234,432 @@ jobs:
           done
           [ "$status" -eq 0 ] || exit 1
           echo 'Refused selections report no hooks run ✅'
+
+  ### commit_range: commit-msg hooks over a history built here ###
+  # A job of its own, in parallel: each case is a further run of the
+  # action, and the suite above already runs close to its timeout.
+  # It also keeps the scratch histories out of that job's workspace.
+  commit-msg:
+    name: 'Test commit-msg stage'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 8
+    steps:
+      # The fixture configuration lives in this repository
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # commit_range runs the selection at the commit-msg stage too,
+      # once per commit. The fixture histories below are built here so
+      # every message, author and committer is known. See
+      # resources/commit-msg-fixture.yaml for the hooks and the
+      # history they expect.
+      #
+      # 'commit-msg-shallow' is a clone two commits deep with 'base'
+      # fetched on its own, so 'base..main' crosses the boundary: git
+      # walks 'main' and the commit before it, stops, and never sees
+      # the WIP commit the range holds.
+      #
+      # 'commit-msg-lower' holds main in full but 'side', a branch
+      # off 'wip', one commit deep. 'side..main' is the two good
+      # commits, yet '^side' cannot exclude ancestry the clone never
+      # fetched, so git also lists the WIP commit and 'Seed'.
+      #
+      # 'merged', a branch off 'main', merges 'side' with a WIP title,
+      # leaving 'main' and every range above untouched. 'main..merged'
+      # is 'Side: Branch' and the merge, so only the merge can fail.
+      - name: 'Create commit histories for the commit-msg cases'
+        shell: bash
+        run: |
+          # Create commit histories for the commit-msg cases
+          set -euo pipefail
+          git init -q -b main commit-msg-scratch
+          cd commit-msg-scratch
+          commit() {
+            GIT_AUTHOR_NAME='Fixture Author' \
+            GIT_AUTHOR_EMAIL='author@example.com' \
+            GIT_COMMITTER_NAME='Fixture Committer' \
+            GIT_COMMITTER_EMAIL='committer@example.com' \
+              git -c commit.gpgsign=false commit -q --allow-empty -m "$1"
+          }
+          commit 'Seed'
+          git tag base
+          commit 'WIP: Not ready'
+          git tag wip
+          git checkout -q -b side wip
+          commit 'Side: Branch'
+          git tag side
+          git checkout -q main
+          commit 'Good: Second change'
+          commit 'Good: Third change'
+          git checkout -q -b merged main
+          GIT_AUTHOR_NAME='Fixture Author' \
+          GIT_AUTHOR_EMAIL='author@example.com' \
+          GIT_COMMITTER_NAME='Fixture Committer' \
+          GIT_COMMITTER_EMAIL='committer@example.com' \
+            git -c commit.gpgsign=false merge -q --no-ff \
+            -m 'WIP: Merge the side branch' refs/tags/side
+          git checkout -q main
+          cd ..
+          git clone -q --depth 2 --branch main \
+            "file://$PWD/commit-msg-scratch" commit-msg-shallow
+          git -C commit-msg-shallow fetch -q --depth 1 origin \
+            'refs/tags/base:refs/tags/base'
+          git clone -q --no-tags --single-branch --branch main \
+            "file://$PWD/commit-msg-scratch" commit-msg-lower
+          git -C commit-msg-lower fetch -q --depth 1 origin \
+            'refs/tags/side:refs/tags/side'
+
+      # Both stages over one selection, one hook per invocation at
+      # pre-commit. 'wip..main' holds the two good commits, so the
+      # run passes only if each commit-msg run sees the AUTHOR's
+      # identity -- the fixture's committer differs, and a runner
+      # configures none.
+      #
+      # Three invocations: one for the pre-commit hook, one per
+      # commit. Four or five would mean a commit-msg hook had also
+      # been 'run' at pre-commit, where prek passes over it silently
+      # and the summary would record a tick it never earned.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/named]"
+        id: commit_msg_named
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          hooks: 'pre-commit-hook, no-wip, author-identity'
+          per_hook_runs: true
+          commit_range: 'wip..main'
+
+      - name: 'Check named hooks ran once at each stage they declare'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.commit_msg_named.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.commit_msg_named.outputs.prek_runs }}
+        run: |
+          # Check named hooks ran once at each stage they declare
+          expected='pre-commit-hook no-wip author-identity'
+          if [ "$HOOKS_RUN" != "$expected" ]; then
+            echo 'Error: unexpected reported set ❌'
+            echo "Got: $HOOKS_RUN"
+            exit 1
+          fi
+          if [ "$INVOCATIONS" != '3' ]; then
+            echo 'Error: expected one pre-commit run and one per' \
+              'commit ❌'
+            echo "Got: $INVOCATIONS"
+            exit 1
+          fi
+          echo 'Each stage ran its own hooks, once per commit ✅'
+
+      # The same range under run-all, where prek chooses the hooks
+      # and the action asks it which fire at commit-msg.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/run-all]"
+        id: commit_msg_all
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'wip..main'
+
+      - name: 'Check run-all checked each commit message'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.commit_msg_all.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.commit_msg_all.outputs.prek_runs }}
+        run: |
+          # Check run-all checked each commit message
+          if [ "$HOOKS_RUN" != 'all' ] || [ "$INVOCATIONS" != '3' ]; then
+            echo 'Error: expected the run-all run plus one per' \
+              'commit ❌'
+            echo "Got: hooks_run=$HOOKS_RUN prek_runs=$INVOCATIONS"
+            exit 1
+          fi
+          echo 'Run-all checked every commit message ✅'
+
+      # Exclusions that empty the pre-commit stage while commit-msg
+      # hooks remain. The run is still needed, for the messages, but
+      # a pre-commit run left to prek would execute nothing, exit 0,
+      # and record 'all hooks | ✅'. Two invocations: one per commit.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/pre-commit excluded]"
+        id: commit_msg_only
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          skip_hooks: 'pre-commit-hook'
+          commit_range: 'wip..main'
+
+      - name: 'Check an empty pre-commit stage was not run'
+        shell: bash
+        env:
+          INVOCATIONS: ${{ steps.commit_msg_only.outputs.prek_runs }}
+        run: |
+          # Check an empty pre-commit stage was not run
+          if [ "$INVOCATIONS" != '2' ]; then
+            echo 'Error: expected one run per commit, and no' \
+              'pre-commit run ❌'
+            echo "Got: $INVOCATIONS"
+            exit 1
+          fi
+          echo 'Only the commit-msg stage ran ✅'
+
+      # A configuration of commit-msg hooks alone, and NO exclusion,
+      # so the resolver's precheck never engages and only the lint
+      # step can tell that pre-commit has nothing to run. Two
+      # invocations: one per commit, and no empty pre-commit run.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/commit-msg hooks only]"
+        id: commit_msg_hooks_only
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-only-fixture.yaml'
+          commit_range: 'wip..main'
+
+      - name: 'Check a configuration without pre-commit hooks'
+        shell: bash
+        env:
+          INVOCATIONS: ${{ steps.commit_msg_hooks_only.outputs.prek_runs }}
+        run: |
+          # Check a configuration without pre-commit hooks
+          if [ "$INVOCATIONS" != '2' ]; then
+            echo 'Error: expected one run per commit, and no' \
+              'pre-commit run ❌'
+            echo "Got: $INVOCATIONS"
+            exit 1
+          fi
+          echo 'No empty pre-commit run was recorded ✅'
+
+      # Run-all over a configuration whose every hook is at pre-push,
+      # a stage no run reaches, even with a range. Nothing executes,
+      # so the outputs must stay empty: 'all' would claim every hook
+      # ran, and a prek_runs of 0 would claim the action ran prek.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/no stage reached]"
+        id: commit_msg_unreached
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/unrunnable-fixture.yaml'
+          commit_range: 'wip..main'
+
+      - name: 'Check a run reaching no stage is a quiet no-op'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.commit_msg_unreached.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.commit_msg_unreached.outputs.prek_runs }}
+        run: |
+          # Check a run reaching no stage is a quiet no-op
+          if [ -n "$HOOKS_RUN" ] || [ -n "$INVOCATIONS" ]; then
+            echo 'Error: a run that executed nothing reported work ❌'
+            echo "Got: hooks_run=$HOOKS_RUN prek_runs=$INVOCATIONS"
+            exit 1
+          fi
+          echo 'Nothing reached, nothing reported ✅'
+
+      # The same configuration with NO range, which is the behaviour
+      # change for callers that never set one: this used to execute
+      # nothing and still record 'all hooks | ✅'. No exclusion, so
+      # the resolver's precheck never engages and only the lint
+      # step can see it.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/no stage reached, no range]"
+        id: unreached_no_range
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/unrunnable-fixture.yaml'
+
+      - name: 'Check a run reaching no stage without a range'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.unreached_no_range.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.unreached_no_range.outputs.prek_runs }}
+        run: |
+          # Check a run reaching no stage without a range
+          if [ -n "$HOOKS_RUN" ] || [ -n "$INVOCATIONS" ]; then
+            echo 'Error: a run that executed nothing reported work ❌'
+            echo "Got: hooks_run=$HOOKS_RUN prek_runs=$INVOCATIONS"
+            exit 1
+          fi
+          echo 'Nothing reached, nothing reported, without a range ✅'
+
+      # The documented floor. 0.2.20 predates prek 0.3's '--stage';
+      # the action passes '--hook-stage' and '--commit-msg-filename',
+      # which it still accepts. A rejected flag exits 2, so this case
+      # shows they are accepted; the rejection case below, at the
+      # same version, shows the hooks really run.
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Commit messages/floor version]"
+        id: commit_msg_floor
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'wip..main'
+          prek_version: '0.2.20'
+
+      - name: 'Check the earliest supported prek checks messages'
+        shell: bash
+        env:
+          HOOKS_RUN: ${{ steps.commit_msg_floor.outputs.hooks_run }}
+          INVOCATIONS: ${{ steps.commit_msg_floor.outputs.prek_runs }}
+        run: |
+          # Check the earliest supported prek checks messages
+          if [ "$HOOKS_RUN" != 'all' ] || [ "$INVOCATIONS" != '3' ]; then
+            echo 'Error: prek 0.2.20 must run both stages ❌'
+            echo "Got: hooks_run=$HOOKS_RUN prek_runs=$INVOCATIONS"
+            exit 1
+          fi
+          echo 'prek 0.2.20 checked every commit message ✅'
+
+      # Rejection cases: each must fail.
+      # 'base..main' holds 'WIP: Not ready'. Run-all passes at
+      # pre-commit, so only the commit-msg runs can fail this.
+      - name: 'A failing commit message in commit_range'
+        id: commit_msg_wip
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'base..main'
+        continue-on-error: true
+
+      # The same failing range at the floor version. Passing here
+      # would mean 0.2.20 ran nothing at commit-msg.
+      - name: 'A failing commit message at the prek floor'
+        id: commit_msg_wip_floor
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'base..main'
+          prek_version: '0.2.20'
+        continue-on-error: true
+
+      # The same range in the shallow clone, which holds both ends
+      # but not the WIP commit between them. git walks what it has
+      # and exits 0, so without the boundary check the two good
+      # messages pass and the range is reported clean.
+      - name: 'commit_range past a shallow boundary'
+        id: commit_msg_shallow
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-shallow'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'base..main'
+        continue-on-error: true
+
+      # The other direction: a shallow LOWER end. The range itself is
+      # complete and holds two good commits, but git also lists the
+      # WIP commit, so without the check this still fails -- after
+      # checking messages outside the range and publishing hooks_run,
+      # which the check below catches.
+      - name: 'commit_range below a shallow lower end'
+        id: commit_msg_shallow_lower
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-lower'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'side..main'
+        continue-on-error: true
+
+      # Selects nothing. Without the check the run still fails, on
+      # an empty commit id, but only after linting the files and
+      # publishing hooks_run -- which the check below catches.
+      - name: 'commit_range selecting no commits'
+        id: commit_msg_empty
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-fixture.yaml'
+          commit_range: 'main..main'
+        continue-on-error: true
+
+      # A merge is a commit in the range like any other. 'main..merged'
+      # holds 'Side: Branch', which passes, and the merge, whose WIP
+      # title fails: a walk that skipped merges would pass this.
+      - name: 'A failing merge commit message in commit_range'
+        id: commit_msg_merge
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'commit-msg-scratch'
+          config_path: 'resources/commit-msg-only-fixture.yaml'
+          commit_range: 'main..merged'
+        continue-on-error: true
+
+      - name: 'Error if any commit-msg rejection case did NOT fail'
+        shell: bash
+        env:
+          COMMIT_MSG_WIP: ${{ steps.commit_msg_wip.outcome }}
+          # yamllint disable-line rule:line-length
+          COMMIT_MSG_WIP_FLOOR: ${{ steps.commit_msg_wip_floor.outcome }}
+          COMMIT_MSG_SHALLOW: ${{ steps.commit_msg_shallow.outcome }}
+          # yamllint disable-line rule:line-length
+          COMMIT_MSG_LOWER: ${{ steps.commit_msg_shallow_lower.outcome }}
+          COMMIT_MSG_EMPTY: ${{ steps.commit_msg_empty.outcome }}
+          COMMIT_MSG_MERGE: ${{ steps.commit_msg_merge.outcome }}
+        run: |
+          # Error if any commit-msg rejection case did NOT fail
+          status=0
+          for check in \
+            "failing commit message in range:$COMMIT_MSG_WIP" \
+            "failing commit message at the floor:$COMMIT_MSG_WIP_FLOOR" \
+            "commit_range past a shallow boundary:$COMMIT_MSG_SHALLOW" \
+            "commit_range below a shallow lower end:$COMMIT_MSG_LOWER" \
+            "commit_range selecting no commits:$COMMIT_MSG_EMPTY" \
+            "failing merge commit message:$COMMIT_MSG_MERGE"; do
+            if [ "${check##*:}" = 'success' ]; then
+              echo "Error: ${check%:*} was NOT rejected ❌"
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+          echo 'All commit-msg rejection cases failed as expected ✅'
+
+      # The ranges refused before anything runs must report no hooks
+      # run. For the empty range and the shallow lower end this is
+      # what pins WHERE they failed: without their checks both still
+      # fail, after linting.
+      - name: 'Check refused ranges report no hooks run'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          COMMIT_MSG_SHALLOW: ${{ steps.commit_msg_shallow.outputs.hooks_run }}
+          # yamllint disable-line rule:line-length
+          COMMIT_MSG_LOWER: ${{ steps.commit_msg_shallow_lower.outputs.hooks_run }}
+          COMMIT_MSG_EMPTY: ${{ steps.commit_msg_empty.outputs.hooks_run }}
+        run: |
+          # Check refused ranges report no hooks run
+          status=0
+          for check in \
+            "commit_range past a shallow boundary:$COMMIT_MSG_SHALLOW" \
+            "commit_range below a shallow lower end:$COMMIT_MSG_LOWER" \
+            "commit_range selecting no commits:$COMMIT_MSG_EMPTY"; do
+            if [ -n "${check#*:}" ]; then
+              echo "Error: ${check%%:*} reported hooks_run=" \
+                "'${check#*:}' having run nothing ❌"
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ] || exit 1
+          echo 'Refused ranges report no hooks run ✅'

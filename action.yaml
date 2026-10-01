@@ -22,6 +22,9 @@
 #   * run_all_hooks: 'true' run every hook in the configuration
 #   * config_path/config_url select an alternate configuration file,
 #     which runs in full unless 'hooks' names a subset
+#   * commit_range: '<from>..<to>' ALSO runs the selected hooks at
+#     the commit-msg stage, once per commit in the range, against
+#     that commit's message
 #
 # Security posture:
 #   * No secrets required; an optional github_token is only exported
@@ -35,6 +38,8 @@
 #     on there.
 #   * config_path is confined to the workspace or the runner temp
 #     directory (symlink escapes rejected via realpath).
+#   * commit_range is allow-listed per side, resolved to commit ids
+#     behind '--end-of-options', and only those ids reach git again.
 #   * config_url must be HTTPS, downloads to a private mktemp
 #     directory (never overwriting repository files, and never a
 #     predictable path a symlink could redirect), is size- and
@@ -80,8 +85,32 @@ inputs:
       this buys the summary table rather than the diagnosis. No
       effect when run_all_hooks is set, which is a single invocation
       by nature.
+
+      Applies to the pre-commit stage alone. With commit_range, each
+      commit's message is checked by ONE invocation running every
+      selected commit-msg hook, whatever this is set to: per hook and
+      per commit would multiply the runs, and prek's output still
+      names the hook that failed.
     required: false
     default: 'false'
+  commit_range:
+    description: >-
+      A '<from>..<to>' revision range, such as '<base sha>..<head sha>'
+      for a pull request. When set, the selected hooks ALSO run at the
+      commit-msg stage, once per commit in the range, merges included,
+      against that commit's message. This is how gitlint and other
+      commit-msg hooks reach CI; without it they never run. The
+      commit-msg stage runs once per commit whatever per_hook_runs
+      says, and the summary gets one row per commit.
+
+      Every commit in the range must be present. The action's own
+      checkout fetches full history when this is set, and a range
+      with an endpoint missing from the clone, one in a shallow clone
+      whose ends reach a boundary, or one selecting no commits is
+      refused rather than linted in part. Each side must match
+      [A-Za-z0-9][A-Za-z0-9._/~^-]*.
+    required: false
+    default: ''
   skip_hooks:
     description: >-
       Space or comma separated hook ids or ALIASES to EXCLUDE from the
@@ -102,10 +131,11 @@ inputs:
 
       Two things stop a hook running, and both remove it from
       hooks_run. One is an exclusion prek confirms it applied. The
-      other is stage: a run reaches pre-commit hooks, and manual ones
-      when named, so a hook left with only pre-push or commit-msg
-      instances is dropped rather than reported as a pass it never
-      earned.
+      other is stage: a run reaches pre-commit hooks, manual ones
+      when named, and commit-msg ones when commit_range is set, so a
+      hook left with only pre-push instances -- or commit-msg ones,
+      without a range -- is dropped rather than reported as a pass it
+      never earned.
 
       An ambient SKIP or PREK_SKIP in the environment is merged
       rather than overridden: prek reads those only when no CLI
@@ -179,9 +209,10 @@ outputs:
     description: >-
       How many 'prek run' commands the action issued: 1 for a whole
       configuration or a selection run together, one per hook under
-      per_hook_runs, and empty when there was nothing to do. Reports
-      the execution SHAPE, which hooks_run cannot -- that names the
-      same set whichever way the hooks were invoked.
+      per_hook_runs, plus one per commit when commit_range has a
+      commit-msg stage to run, and empty when there was nothing to do.
+      Reports the execution SHAPE, which hooks_run cannot -- that names
+      the same set whichever way the hooks were invoked.
 
       Counts runs alone. The action also issues 'prek list' to resolve
       exclusions and to check requested names, and those are not
@@ -207,6 +238,9 @@ runs:
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
+        # A commit range needs its commits present. The default depth
+        # of one holds a single commit, so fetch everything instead.
+        fetch-depth: ${{ inputs.commit_range == '' && '1' || '0' }}
       if: inputs.no_checkout != 'true'
 
     - name: 'Validate inputs'
@@ -225,6 +259,7 @@ runs:
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
+        INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
       run: |
         # Validate inputs
         set -euo pipefail
@@ -257,6 +292,7 @@ runs:
         check_clean "$INPUT_CONFIG_URL" 'config_url' || true
         check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
         check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
+        check_clean "$INPUT_COMMIT_RANGE" 'commit_range' || true
         # Both of these are validated by a line-anchored 'grep'
         # below, so both need this first for the reason given above.
         #
@@ -393,6 +429,34 @@ runs:
             */../*) err "branch_name must not contain '..'" ;;
           esac
         fi
+        # Each side reaches 'git rev-parse', so it is held to a
+        # revision allow-list: names, ids, and the '~'/'^' suffixes
+        # a range such as 'HEAD~3..HEAD' needs. A leading
+        # alphanumeric keeps a side from reading as an option.
+        #
+        # Split at the FIRST '..'. git's symmetric difference 'a...b'
+        # then leaves '.b', which the leading alphanumeric refuses. A
+        # second '..', as in 'a..b..c', is refused outright: '.' is
+        # legal inside a name, so 'b..c' would pass the pattern.
+        if [ -n "$INPUT_COMMIT_RANGE" ]; then
+          case "$INPUT_COMMIT_RANGE" in
+            *..*)
+              for side in "${INPUT_COMMIT_RANGE%%..*}" \
+                "${INPUT_COMMIT_RANGE#*..}"; do
+                case "$side" in
+                  *..*) err "invalid revision in commit_range: $side" ;;
+                  *)
+                    if ! printf '%s' "$side" |
+                      grep -qE '^[A-Za-z0-9][A-Za-z0-9._/~^-]*$'; then
+                      err "invalid revision in commit_range: $side"
+                    fi
+                    ;;
+                esac
+              done
+              ;;
+            *) err "commit_range must be '<from>..<to>'" ;;
+          esac
+        fi
 
         # Path containment: reject absolute paths and '..' segments,
         # then resolve symlinks and confirm the real path stays inside
@@ -514,6 +578,9 @@ runs:
         # 'prek list' what survives the exclusions.
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
         DOWNLOADED_CONFIG: ${{ steps.download.outputs.config_file }}
+        # A range makes commit-msg a stage the run reaches, which the
+        # exclusion comparison and the run-all precheck both weigh.
+        INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
       run: |
         # Resolve configuration and hooks
         set -euo pipefail
@@ -843,7 +910,16 @@ runs:
         # line falls back to that stage (prek 0.2.20). The run-all
         # precheck uses a NARROWER set, since an unqualified
         # 'run --all-files' leaves manual hooks alone.
-        RUNNABLE_STAGES = frozenset({'pre-commit', 'manual'})
+        #
+        # 'commit-msg' joins them when commit_range is set: the lint
+        # step then runs the selection at that stage as well, so a
+        # name left with only a commit-msg instance still runs and
+        # must not be dropped as though excluded.
+        RUNNABLE_STAGES = frozenset({'pre-commit', 'manual'}) | (
+            frozenset({'commit-msg'})
+            if os.environ.get('INPUT_COMMIT_RANGE')
+            else frozenset()
+        )
 
 
         def entry_names(entry):
@@ -1053,10 +1129,38 @@ runs:
           remaining=$(uvx --no-config "prek@$INPUT_PREK_VERSION" list \
             --config "$cfg" --hook-stage pre-commit \
             "${list_args[@]+"${list_args[@]}"}") || list_status=$?
+          # An empty pre-commit set leaves the commit-msg stage to ask
+          # about. With a commit range, a hook surviving there keeps
+          # the run needed, for the messages, and the lint step leaves
+          # out a pre-commit run that would have nothing to execute.
+          # Without one, the run is a no-op either way -- but a
+          # commit-msg hook left configured and unchecked is the case
+          # the summary promises to name, so the reason names it.
+          commit_msg_left=''
           if [ "$list_status" -eq 0 ] && [ -z "$remaining" ]; then
+            commit_msg_left=$(uvx --no-config "prek@$INPUT_PREK_VERSION" \
+              list --config "$cfg" --hook-stage commit-msg \
+              "${list_args[@]+"${list_args[@]}"}") || list_status=$?
+          fi
+          if [ "$list_status" -eq 0 ] && [ -z "$remaining" ] &&
+            { [ -z "$commit_msg_left" ] || [ -z "$INPUT_COMMIT_RANGE" ]; }; then
             run_needed='false'
             no_work_reason='no hook in the configuration remains to'
             no_work_reason="$no_work_reason run"
+            if [ -n "$commit_msg_left" ]; then
+              # Ids come from the configuration, unvetted, and this
+              # reason goes into a single-line GITHUB_OUTPUT record:
+              # printable characters only, one line, and the root
+              # project's '.:' prefix dropped for readability.
+              commit_msg_left=$(printf '%s\n' "$commit_msg_left" |
+                sed 's/^\.://' | tr -cd '[:print:]\n' | tr '\n' ' ')
+              commit_msg_left="${commit_msg_left% }"
+              no_work_reason="$no_work_reason at pre-commit; commit-msg"
+              no_work_reason="$no_work_reason hooks are configured but"
+              no_work_reason="$no_work_reason were not run: $commit_msg_left."
+              no_work_reason="$no_work_reason Set commit_range to check"
+              no_work_reason="$no_work_reason commit messages"
+            fi
             echo "::notice::$no_work_reason; nothing to do ✅"
           fi
           # A non-zero status is 'could not tell', not 'nothing to
@@ -1128,6 +1232,7 @@ runs:
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
+        INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
@@ -1212,6 +1317,83 @@ runs:
             echo "Skipping: $skip_id 💬"
           done <<< "$SKIP_EFFECTIVE"
         fi
+        # commit_range, resolved to the commits it selects BEFORE
+        # anything runs. A range this clone cannot walk in full is
+        # refused, never linted in part: quietly checking three of a
+        # pull request's ten messages is the green check that linted
+        # less than it claims.
+        #
+        # Each side passed the validate step's allow-list. Both are
+        # resolved to commit ids behind '--end-of-options', and only
+        # those ids reach git from here on.
+        commits=()
+        if [ -n "$INPUT_COMMIT_RANGE" ]; then
+          range_from=$(git rev-parse --verify --quiet --end-of-options \
+            "${INPUT_COMMIT_RANGE%%..*}^{commit}") || range_from=''
+          range_to=$(git rev-parse --verify --quiet --end-of-options \
+            "${INPUT_COMMIT_RANGE#*..}^{commit}") || range_to=''
+          if [ -z "$range_from" ] || [ -z "$range_to" ]; then
+            echo '::error::commit_range names a revision this clone' \
+              "does not hold: $INPUT_COMMIT_RANGE ❌"
+            echo '::error::Check out with fetch-depth: 0, or fetch' \
+              'both ends of the range, so every commit in it can be' \
+              'checked.'
+            exit 1
+          fi
+          range_list=$(git rev-list --reverse "$range_to" "^$range_from")
+          if [ -z "$range_list" ]; then
+            echo '::error::commit_range selects no commits:' \
+              "$INPUT_COMMIT_RANGE ❌"
+            echo '::error::A reversed range, or one whose ends are' \
+              'the same commit, selects nothing. Refusing rather than' \
+              'report a check of commit messages that checked none.'
+            exit 1
+          fi
+          # A shallow clone ends a walk at its boundary, a commit whose
+          # parents were never fetched, and that breaks the range in
+          # BOTH directions:
+          #
+          #   above 'from': the walk stops short. Measured with git
+          #   2.53, a four-commit range in a clone one commit deep
+          #   listed ONE commit and exited 0.
+          #
+          #   below 'from': '^from' cannot exclude ancestry it never
+          #   saw. With 'from' a shallow side branch, 'from..to'
+          #   listed four commits where the range holds two, and
+          #   linted messages it was never asked about.
+          #
+          # Telling the harmless boundaries from these is not worth
+          # the risk, so ANY boundary reachable from either end is
+          # refused. The action's own checkout fetches full history
+          # when a range is set, and holds none.
+          # Read in full before matching, not piped: 'grep -q' stops at
+          # its first match, a long walk then dies of SIGPIPE, and
+          # under pipefail that failure would read as 'no boundary'.
+          if [ "$(git rev-parse --is-shallow-repository)" = 'true' ]; then
+            reachable=$(git rev-list "$range_to" "$range_from")
+          else
+            reachable=''
+          fi
+          if [ -n "$reachable" ] &&
+            grep -qxFf "$(git rev-parse --git-path shallow)" \
+              <<< "$reachable"; then
+            echo '::error::commit_range meets the boundary of this' \
+              "shallow clone: $INPUT_COMMIT_RANGE ❌"
+            echo '::error::History beyond a boundary was never' \
+              'fetched, so the commits this range selects cannot be' \
+              'told apart from the rest, and checking a guess would' \
+              'report the range as clean. Check out with' \
+              'fetch-depth: 0.'
+            exit 1
+          fi
+          mapfile -t commits <<< "$range_list"
+          echo "Commit messages to check: ${#commits[@]} 💬"
+        fi
+        # Which named hooks each stage runs. Without commit_range
+        # every survivor of the preflight runs at pre-commit; with it
+        # the preflight splits them by the stages they declare.
+        pre_commit_hooks="$RESOLVED_HOOKS"
+        commit_msg_hooks=''
         # Every hook this run was asked for must be one prek will
         # actually execute. Two ways it might not be, and prek
         # reports neither as a failure.
@@ -1232,6 +1414,8 @@ runs:
         # printed nothing and exited 0. So a commit-msg hook such as
         # gitlint collects a tick without running, and a hook whose
         # entry is 'false' -- one that cannot pass -- reports a pass.
+        # commit_range adds commit-msg to the stages a run reaches,
+        # through a run of its own per commit below.
         #
         # Both are the green check that linted nothing, so both fail
         # the run here and name what was wrong.
@@ -1278,7 +1462,14 @@ runs:
         # Stages a run reaches when it NAMES a hook. Naming one falls
         # back to the manual stage (prek 0.2.20), which an unqualified
         # run-all does not -- but run-all never reaches this check.
-        RUNNABLE_STAGES = frozenset({"pre-commit", "manual"})
+        PRE_COMMIT_STAGES = frozenset({"pre-commit", "manual"})
+        # Reached as well when commit_range is set, by the run that
+        # checks each commit's message.
+        COMMIT_MSG_STAGES = (
+            frozenset({"commit-msg"})
+            if os.environ.get("INPUT_COMMIT_RANGE")
+            else frozenset()
+        )
 
         try:
             with open(sys.argv[1], encoding="utf-8") as handle:
@@ -1291,16 +1482,19 @@ runs:
         # A name may reach several hooks: prek permits a duplicate id,
         # and an alias names one instance of it. Collect the stages of
         # every instance a name reaches, so one runnable instance is
-        # enough to keep the name.
+        # enough to keep the name -- at each stage it reaches.
         stages_for = {}
         for entry in listed:
             if not isinstance(entry, dict) or not entry.get("id"):
                 sys.exit("the hook listing has an entry with no id")
             stages = entry.get("stages")
-            # Absent means every stage, so the hook is reachable.
-            reachable = (
-                not isinstance(stages, list)
-                or bool(RUNNABLE_STAGES.intersection(stages))
+            # Absent means every stage.
+            every = not isinstance(stages, list)
+            at_pre_commit = every or bool(
+                PRE_COMMIT_STAGES.intersection(stages)
+            )
+            at_commit_msg = bool(COMMIT_MSG_STAGES) and (
+                every or bool(COMMIT_MSG_STAGES.intersection(stages))
             )
             seen = [s for s in (stages or []) if isinstance(s, str)]
             for key in ("id", "alias"):
@@ -1308,22 +1502,37 @@ runs:
                 if value:
                     name = str(value)
                     hit = stages_for.setdefault(
-                        name, {"reachable": False, "stages": set()}
+                        name,
+                        {
+                            "pre-commit": False,
+                            "commit-msg": False,
+                            "stages": set(),
+                        },
                     )
-                    hit["reachable"] = hit["reachable"] or reachable
+                    hit["pre-commit"] = hit["pre-commit"] or at_pre_commit
+                    hit["commit-msg"] = hit["commit-msg"] or at_commit_msg
                     hit["stages"].update(seen)
 
         undefined = []
         unreachable = []
+        pre_commit = []
+        commit_msg = []
         for name in os.environ["REQUESTED"].split():
             hit = stages_for.get(name)
             if hit is None:
                 undefined.append(name)
-            elif not hit["reachable"]:
+            elif not (hit["pre-commit"] or hit["commit-msg"]):
                 stages = "/".join(sorted(hit["stages"])) or "none"
                 unreachable.append(f"{name} ({stages})")
+            else:
+                if hit["pre-commit"]:
+                    pre_commit.append(name)
+                if hit["commit-msg"]:
+                    commit_msg.append(name)
         print(" ".join(undefined))
         print(" ".join(unreachable))
+        print(" ".join(pre_commit))
+        print(" ".join(commit_msg))
         PYEOF
           rm -rf "$known_dir"
           # A failed CHECK is not a bad hook name. Reporting it as
@@ -1337,6 +1546,8 @@ runs:
           fi
           undefined=$(printf '%s' "$verdict" | sed -n '1p')
           unreachable=$(printf '%s' "$verdict" | sed -n '2p')
+          pre_commit_hooks=$(printf '%s' "$verdict" | sed -n '3p')
+          commit_msg_hooks=$(printf '%s' "$verdict" | sed -n '4p')
           if [ -n "$undefined" ]; then
             echo "::error::requested hooks the configuration does" \
               "not define: $undefined ❌"
@@ -1349,14 +1560,129 @@ runs:
           if [ -n "$unreachable" ]; then
             echo "::error::requested hooks run at no stage this" \
               "action reaches: $unreachable ❌"
-            echo '::error::A run executes pre-commit hooks, and' \
-              'manual ones when named. prek passes over the rest' \
-              'without output and exits 0, so this run would have' \
-              'reported a pass without executing them. Run such' \
-              'hooks in a dedicated job; see' \
-              'standalone-linting-action#143.'
+            echo '::error::A run executes pre-commit hooks, manual' \
+              'ones when named, and commit-msg ones when commit_range' \
+              'is set. prek passes over the rest without output and' \
+              'exits 0, so this run would have reported a pass' \
+              'without executing them.'
+            case "$unreachable" in
+              *commit-msg*)
+                if [ -z "$INPUT_COMMIT_RANGE" ]; then
+                  echo '::error::Set commit_range to check commit' \
+                    'messages with a commit-msg hook such as gitlint.'
+                fi
+                ;;
+            esac
+            echo '::error::Run hooks at any other stage in a' \
+              'dedicated job.'
             exit 1
           fi
+        fi
+
+        # Run-all hands prek the whole configuration, so ask prek
+        # which stages its hooks reach, with the run's exclusions --
+        # ONE listing, every stage, as each hook resolves them
+        # ('default_stages' applied).
+        #
+        # With a range, it says whether any message has a hook to
+        # check it, and whether the pre-commit run has anything to
+        # execute. A configuration of commit-msg hooks alone would
+        # otherwise get a pre-commit run that executed nothing,
+        # exited 0, and recorded 'all hooks | ✅'.
+        #
+        # Without a range, a hook ONLY commit-msg reaches is
+        # configured and never checked -- and the summary says so,
+        # rather than leaving a green check to imply it ran.
+        run_all_pre_commit='true'
+        run_all_commit_msg='false'
+        unchecked_commit_msg=''
+        if [ "$RUN_ALL" = 'true' ]; then
+          msg_list_dir=$(mktemp -d "$RUNNER_TEMP/prek-msg.XXXXXXXX")
+          msg_list_json="$msg_list_dir/stages.json"
+          msg_list_status=0
+          uvx --no-config "prek@$INPUT_PREK_VERSION" list \
+            --config "$CONFIG_FILE" --output-format json \
+            "${skip_args[@]+"${skip_args[@]}"}" > "$msg_list_json" ||
+            msg_list_status=$?
+          if [ "$msg_list_status" -eq 0 ]; then
+            msg_verdict=$(uv run --no-config --no-project python - \
+              "$msg_list_json" <<'PYEOF'
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            listed = json.load(handle)
+        if not isinstance(listed, list):
+            sys.exit("the hook listing is not a JSON array")
+        pre_commit = False
+        commit_msg = False
+        # Run-all reaches pre-commit alone, so a hook at commit-msg
+        # and not there is one that only a commit-msg run executes.
+        only = []
+        for entry in listed:
+            stages = entry.get("stages") if isinstance(entry, dict) else None
+            # A listing without stages predates the field: every stage.
+            if not isinstance(stages, list):
+                pre_commit = commit_msg = True
+                continue
+            pre_commit = pre_commit or "pre-commit" in stages
+            if "commit-msg" in stages:
+                commit_msg = True
+                # Unvetted, and bound for a notice: printable only.
+                name = "".join(
+                    ch for ch in str(entry.get("id") or "") if ch.isprintable()
+                )
+                if "pre-commit" not in stages and name and name not in only:
+                    only.append(name)
+        print("true" if pre_commit else "false")
+        print("true" if commit_msg else "false")
+        print(" ".join(only))
+        PYEOF
+            ) || msg_list_status=$?
+          fi
+          rm -rf "$msg_list_dir"
+          if [ "$msg_list_status" -ne 0 ]; then
+            # Without a range this only feeds a notice, and the run
+            # reports for itself. With one, it decides whether any
+            # message is checked, so it must not be guessed.
+            if [ -n "$INPUT_COMMIT_RANGE" ]; then
+              echo "::error::could not list the stages this" \
+                "configuration's hooks run at ❌"
+              exit 1
+            fi
+          else
+            run_all_pre_commit=$(printf '%s' "$msg_verdict" | sed -n '1p')
+            run_all_commit_msg=$(printf '%s' "$msg_verdict" | sed -n '2p')
+            if [ -z "$INPUT_COMMIT_RANGE" ]; then
+              unchecked_commit_msg=$(printf '%s' "$msg_verdict" |
+                sed -n '3p')
+            fi
+          fi
+        fi
+
+        # Run-all with nothing at any stage this run reaches: every
+        # hook at pre-push, say, or commit-msg hooks with no range.
+        # prek would execute nothing and exit 0, and publishing 'all'
+        # would claim every hook ran. A clean no-op instead, as when
+        # exclusions empty the configuration: outputs empty, and the
+        # summary saying why.
+        if [ "$RUN_ALL" = 'true' ] && [ "$run_all_pre_commit" = 'false' ] &&
+          { [ -z "$INPUT_COMMIT_RANGE" ] ||
+            [ "$run_all_commit_msg" != 'true' ]; }; then
+          reason='no hook in the configuration runs at a stage this'
+          reason="$reason action reaches"
+          if [ -n "$unchecked_commit_msg" ]; then
+            reason="$reason; commit-msg hooks are configured but were"
+            reason="$reason not run: $unchecked_commit_msg. Set"
+            reason="$reason commit_range to check commit messages"
+          fi
+          echo "::notice::$reason; nothing to do ✅"
+          {
+            echo '## 🧹 Standalone Linting'
+            echo ''
+            echo "No hooks to run: $reason ✅"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
         fi
 
         # Published HERE, past the preflight, rather than straight
@@ -1368,16 +1694,27 @@ runs:
         # hook still ran.
         echo "hooks_run=$HOOKS_LABEL" >> "$GITHUB_OUTPUT"
 
-        if [ "$RUN_ALL" = 'true' ]; then
+        # The pre-commit stage. A selection may hold nothing for it --
+        # 'hooks: gitlint' with a commit range, or run-all over
+        # commit-msg hooks alone -- and an EMPTY named one must not
+        # reach prek: 'prek run' with no selector runs every hook in
+        # the configuration. Run-all reaching here with nothing at
+        # pre-commit has commit-msg work and a range, by the no-op
+        # above.
+        if [ "$RUN_ALL" = 'true' ] && [ "$run_all_pre_commit" = 'false' ]; then
+          echo 'No hook remains to run at pre-commit 💬'
+        elif [ "$RUN_ALL" = 'true' ]; then
           if uvx --no-config "prek@$INPUT_PREK_VERSION" run --all-files \
             --show-diff-on-failure --config "$CONFIG_FILE" \
             "${skip_args[@]+"${skip_args[@]}"}"; then
-            rows='| all hooks | ✅ |'
+            rows=$'| all hooks | ✅ |\n'
           else
-            rows='| all hooks | ❌ |'
+            rows=$'| all hooks | ❌ |\n'
             status=1
           fi
           invocations=1
+        elif [ -z "$pre_commit_hooks" ]; then
+          echo 'No selected hook runs at pre-commit 💬'
         elif [ "$PER_HOOK_RUNS" != 'true' ]; then
           # ONE invocation for the whole selection, which is the
           # default. prek runs hooks concurrently and shares their
@@ -1391,23 +1728,23 @@ runs:
           # its hook id -- so this trades the table, not the
           # diagnosis. per_hook_runs restores the table.
 
-          read -ra hook_list <<< "$RESOLVED_HOOKS"
-          echo "::group::prek run $RESOLVED_HOOKS"
+          read -ra hook_list <<< "$pre_commit_hooks"
+          echo "::group::prek run $pre_commit_hooks"
           # '--' terminates option parsing, for the reason given on
           # the per-hook branch below.
           if uvx --no-config "prek@$INPUT_PREK_VERSION" run --all-files \
             --show-diff-on-failure --config "$CONFIG_FILE" \
             "${skip_args[@]+"${skip_args[@]}"}" \
             -- "${hook_list[@]}"; then
-            rows="| $RESOLVED_HOOKS | ✅ |"
+            rows="| $pre_commit_hooks | ✅ |"$'\n'
           else
-            rows="| $RESOLVED_HOOKS | ❌ |"
+            rows="| $pre_commit_hooks | ❌ |"$'\n'
             status=1
           fi
           echo '::endgroup::'
           invocations=1
         else
-          read -ra hook_list <<< "$RESOLVED_HOOKS"
+          read -ra hook_list <<< "$pre_commit_hooks"
           for hook in "${hook_list[@]}"; do
             echo "::group::prek run $hook"
             # '--' terminates option parsing: without it a hook id
@@ -1428,6 +1765,92 @@ runs:
             invocations=$((invocations + 1))
           done
         fi
+
+        # The commit-msg stage: one prek run per commit, oldest
+        # first, each against that commit's message.
+        #
+        # One per commit because a commit-msg hook takes ONE message
+        # file -- prek passes '--commit-msg-filename' to the hook as
+        # its argument. '--from-ref'/'--to-ref' select FILES for the
+        # other stages and enumerate no messages.
+        #
+        # '--hook-stage', not prek 0.3's '--stage': 0.2.20, the
+        # documented floor, knows only the former, and every later
+        # release measured (0.3.0, 0.4.14) still accepts it.
+        notes=''
+        if [ "${#commits[@]}" -gt 0 ]; then
+          commit_msg_args=()
+          if [ "$RUN_ALL" = 'true' ]; then
+            [ "$run_all_commit_msg" = 'true' ] || commits=()
+          elif [ -n "$commit_msg_hooks" ]; then
+            read -ra commit_msg_list <<< "$commit_msg_hooks"
+            commit_msg_args=(-- "${commit_msg_list[@]}")
+          else
+            commits=()
+          fi
+          if [ "${#commits[@]}" -eq 0 ]; then
+            # Distinct from 'configured but not run', which a missing
+            # commit_range produces: here the range was given and no
+            # selected hook declares the stage.
+            notes='No selected hook runs at the commit-msg stage, so'
+            notes="$notes no commit message was checked."
+            echo "::notice::$notes"
+          fi
+        fi
+        if [ "${#commits[@]}" -gt 0 ]; then
+          msg_dir=$(mktemp -d "$RUNNER_TEMP/commit-msg.XXXXXXXX")
+          msg_file="$msg_dir/COMMIT_EDITMSG"
+          # gitlint, the common commit-msg hook, refuses to run without
+          # a configured identity -- 'Missing git configuration: please
+          # set user.name', exit 254 -- and a CI runner has none. Give
+          # each run the identity of the commit's AUTHOR, as at the
+          # author's own commit, through GIT_CONFIG_COUNT: scoped to
+          # that one process and written nowhere. Appended after any
+          # entries the caller already set, which keep their meaning.
+          config_base="${GIT_CONFIG_COUNT:-0}"
+          case "$config_base" in
+            ''|*[!0-9]*)
+              echo '::error::GIT_CONFIG_COUNT must be a number ❌'
+              exit 1
+              ;;
+          esac
+          config_base=$((10#$config_base))
+          for sha in "${commits[@]}"; do
+            # The message exactly as committed: the commit object
+            # with its headers removed. 'git log' would apply
+            # log.showSignature and similar display settings.
+            git cat-file commit "$sha" | sed '1,/^$/d' > "$msg_file"
+            author_name=$(git log -1 --no-show-signature \
+              --format='%an' "$sha")
+            author_email=$(git log -1 --no-show-signature \
+              --format='%ae' "$sha")
+            echo "::group::prek run --hook-stage commit-msg ${sha:0:12}"
+            if env GIT_CONFIG_COUNT=$((config_base + 2)) \
+              "GIT_CONFIG_KEY_$config_base=user.name" \
+              "GIT_CONFIG_VALUE_$config_base=$author_name" \
+              "GIT_CONFIG_KEY_$((config_base + 1))=user.email" \
+              "GIT_CONFIG_VALUE_$((config_base + 1))=$author_email" \
+              uvx --no-config "prek@$INPUT_PREK_VERSION" run \
+              --hook-stage commit-msg --all-files \
+              --commit-msg-filename "$msg_file" --config "$CONFIG_FILE" \
+              "${skip_args[@]+"${skip_args[@]}"}" \
+              "${commit_msg_args[@]+"${commit_msg_args[@]}"}"; then
+              rows="$rows| commit-msg ${sha:0:12} | ✅ |"$'\n'
+            else
+              rows="$rows| commit-msg ${sha:0:12} | ❌ |"$'\n'
+              status=1
+            fi
+            echo '::endgroup::'
+            invocations=$((invocations + 1))
+          done
+          rm -rf "$msg_dir"
+        fi
+        if [ -n "$unchecked_commit_msg" ]; then
+          notes='commit-msg hooks are configured but were not run:'
+          notes="$notes $unchecked_commit_msg. Set commit_range to"
+          notes="$notes check commit messages."
+          echo "::notice::$notes"
+        fi
         # Published so a caller -- and this action's own fixtures --
         # can see the execution SHAPE. hooks_run cannot show it: the
         # resolver produces that, and it names the same set whichever
@@ -1438,6 +1861,7 @@ runs:
         # the resolver's, decide what to run rather than running it,
         # so folding them in would make the same selection report a
         # different number depending on whether an exclusion was set.
+        # Each commit-msg run counts: it is one 'prek run' per commit.
         echo "prek_runs=$invocations" >> "$GITHUB_OUTPUT"
         {
           echo '## 🧹 Standalone Linting'
@@ -1446,6 +1870,10 @@ runs:
           echo '| ---- | ------ |'
           printf '%s' "$rows"
           echo ''
+          if [ -n "$notes" ]; then
+            echo "$notes"
+            echo ''
+          fi
         } >> "$GITHUB_STEP_SUMMARY"
         exit "$status"
 
