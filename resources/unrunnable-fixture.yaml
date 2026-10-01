@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Fixture for the unrunnable-hook test in testing.yaml.
+# Fixture for the unrunnable-hook tests in testing.yaml.
 #
 # A configuration whose every hook sits at a stage no run reaches.
 # Excluding that hook is coherent, and must be the same quiet no-op
-# as excluding a runnable one.
+# as excluding a runnable one. Running it under run_all_hooks, with
+# or without a commit range, must be that no-op too: nothing
+# executes, so nothing may be reported as run.
 #
 # The trap is in how the exclusion is worked out. Comparing two
 # stage-filtered listings makes this hook absent from BOTH sides, so

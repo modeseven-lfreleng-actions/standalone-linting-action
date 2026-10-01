@@ -236,6 +236,12 @@ accept 'a workspace config_path with per_hook_runs' \
     INPUT_HOOKS='check-yaml' \
     INPUT_PER_HOOK_RUNS='true'
 
+accept 'a commit_range of names and suffixes' \
+    INPUT_COMMIT_RANGE='origin/main..HEAD~1'
+
+accept 'a commit_range of commit ids' \
+    INPUT_COMMIT_RANGE="${zero_digest:0:40}..${zero_digest:0:40}"
+
 # --- Refused -----------------------------------------------------------
 
 # One per rejection case in testing.yaml that this step refuses, with
@@ -292,6 +298,31 @@ reject 'prek_version below the floor' \
 reject 'prek_version colliding under a packed radix' \
     'prek_version must be 0.2.20 or newer' \
     INPUT_PREK_VERSION='0.1.100020'
+
+# Each side of a range reaches 'git rev-parse'. A side starting '-'
+# would read as an option, and '...' is git's symmetric difference,
+# a different set of commits from the range the input documents.
+reject 'option-shaped side in commit_range' \
+    'invalid revision in commit_range: --all' \
+    INPUT_COMMIT_RANGE='--all..HEAD'
+
+reject 'symmetric difference as a commit_range' \
+    'invalid revision in commit_range: .main' \
+    INPUT_COMMIT_RANGE='origin/main...main'
+
+# '.' is legal inside a name, so only the check for a second '..'
+# stops the trailing side passing the pattern.
+reject 'chained ranges in commit_range' \
+    'invalid revision in commit_range: HEAD..main' \
+    INPUT_COMMIT_RANGE='HEAD~2..HEAD..main'
+
+reject 'commit_range without a range' \
+    "commit_range must be '<from>..<to>'" \
+    INPUT_COMMIT_RANGE='HEAD'
+
+reject 'multi-line commit_range' \
+    'commit_range must not contain control characters' \
+    INPUT_COMMIT_RANGE=$'HEAD~1..HEAD\nHEAD~9..HEAD'
 
 # --- Result ------------------------------------------------------------
 

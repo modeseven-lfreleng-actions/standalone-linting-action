@@ -1,0 +1,57 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture for the commit-msg tests in testing.yaml.
+#
+# Those tests build a small repository whose commit messages they
+# choose, and name a range of it in commit_range:
+#
+#   base          'Seed'
+#   wip           'WIP: Not ready'
+#                   \-- side    'Side: Branch'
+#                 'Good: Second change'
+#   main          'Good: Third change'
+#                   \-- merged  'WIP: Merge the side branch'
+#                                (merges 'side' into 'main')
+#
+# 'no-wip' fails a message holding a line that starts 'WIP'. pygrep
+# matches line by line, so the fixture commits keep that word off
+# every other line.
+#
+# 'author-identity' passes only when the run sees the commit's AUTHOR
+# as its git identity. A CI runner configures none, and gitlint
+# refuses to start without one, so the action supplies it per run.
+# The fixture commits use a different committer, so a run handed the
+# wrong identity fails as surely as one handed none.
+#
+# 'pre-commit-hook' gives the pre-commit stage something to run, so a
+# test can count the two stages apart.
+#
+# Not discovered by prek's workspace mode: that looks for prek.toml,
+# .pre-commit-config.yaml and .pre-commit-config.yml, and this is
+# none of them. The tests reach it through config_path.
+
+repos:
+  - repo: local
+    hooks:
+      - id: no-wip
+        name: 'Commit message has no WIP line'
+        entry: '^WIP'
+        language: pygrep
+        stages: [commit-msg]
+
+      - id: author-identity
+        name: 'Runs as the commit author'
+        entry: sh -c 'test "$(git config user.email)" = author@example.com'
+        language: system
+        pass_filenames: false
+        stages: [commit-msg]
+
+      - id: pre-commit-hook
+        name: 'Runs at pre-commit'
+        entry: 'true'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

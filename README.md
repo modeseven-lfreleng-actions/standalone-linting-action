@@ -48,8 +48,8 @@ jobs:
 
 Run an explicit subset of hooks, space or comma separated. Names may
 be a hook's id or its `alias`, and the hooks must run at the
-`pre-commit` or `manual` stage — the action does not reach
-`commit-msg` hooks such as `gitlint`:
+`pre-commit` or `manual` stage, or at `commit-msg`, for hooks such as
+`gitlint`, when the caller supplies `commit_range`:
 
 ```yaml
       - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
@@ -67,6 +67,18 @@ Run every hook from a remote configuration, with integrity pinning
           config_sha256: '<sha256 of the configuration file>'
 ```
 
+Check every commit message in a pull request with the configuration's
+`commit-msg` hooks, such as `gitlint`, as well as linting the files.
+`commit_range` is newer than v0.5.0, so pin a release that includes it
+rather than the commit shown in these examples:
+
+```yaml
+      - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
+        with:
+          run_all_hooks: 'true'
+          commit_range: '${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}'
+```
+
 <!-- markdownlint-enable MD013 -->
 
 ## Inputs
@@ -79,6 +91,7 @@ Run every hook from a remote configuration, with integrity pinning
 | skip_hooks    | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |         |
 | run_all_hooks | False    | Run every hook in the configuration (exclusive with hooks)            | false   |
 | per_hook_runs | False    | Invoke prek once per hook, for one summary row each                   | false   |
+| commit_range  | False    | `<from>..<to>`; also run commit-msg hooks on each commit's message    |         |
 | config_path   | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |         |
 | config_url    | False    | HTTPS download URL for the configuration (exclusive with config_path) |         |
 | config_sha256 | False    | Expected SHA-256 of the file fetched from config_url                  |         |
@@ -98,7 +111,7 @@ Run every hook from a remote configuration, with integrity pinning
 | ----------- | ---------------------------------------------------------------------------------- |
 | config_file | Resolved path of the linting configuration file                                    |
 | hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
-| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, empty on no-op               |
+| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, plus one per commit checked  |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -183,11 +196,12 @@ reaches prek, which refuses it.
 
 Two conditions remove a hook from the reported set. The first is an
 exclusion prek confirms it applied. The second is **stage**: a run
-reaches `pre-commit` hooks, plus `manual` ones when named, so the
-action drops a hook whose remaining instances sit at `pre-push`,
-`commit-msg` or another stage a run never enters. prek passes over
-such a hook without output at exit 0, and reporting that as a tick
-would claim a check that never ran.
+reaches `pre-commit` hooks, plus `manual` ones when named and
+`commit-msg` ones given a `commit_range`, so the action drops a
+hook whose remaining instances sit at `pre-push` or another stage the
+run does not enter. prek passes over such a hook without output at
+exit 0, and reporting that as a tick would claim a check that never
+ran.
 
 Naming such a hook **fails the run**. Where an exclusion leaves a
 selected hook with no reachable instance the resolver drops it, but a
@@ -202,15 +216,15 @@ so rather than reporting a pass:
 
 <!-- markdownlint-enable MD013 -->
 
-That is the case `gitlint` falls into. Run such hooks in a dedicated
-job until [#143][issue-143] lands.
-
-[issue-143]: https://github.com/lfreleng-actions/standalone-linting-action/issues/143
+That is the case `gitlint` falls into without `commit_range`, and the
+error says so; see [Commit messages](#commit-messages).
 
 The distinction matters for `hooks_run`, which reports what ran
 rather than what the caller asked for. Excluding every hook is a
 clean no-op in both modes, and a refused selection reports nothing,
-because nothing ran.
+because nothing ran. Under `run_all_hooks`, a configuration with no
+hook at a stage the run reaches, such as one of `pre-push` hooks
+alone, is the same no-op.
 
 Note that prek treats a `--skip` id matching no hook as a no-op, so a
 stale entry narrows nothing and the run stays green. Unlike `hooks`,
@@ -244,6 +258,71 @@ Configuration file resolution order:
 A remote configuration never overwrites files in the repository; the
 action passes it to prek with `--config`.
 
+### Commit messages
+
+Hooks at the `commit-msg` stage, `gitlint` being the common one, check
+a commit message rather than files. A run never reaches them on its
+own: prek passes over them without output and exits 0. Set
+`commit_range` to run them.
+
+With `commit_range: '<from>..<to>'` the selected hooks **also** run at
+the `commit-msg` stage, once per commit in the range, oldest first,
+merges included. Each run checks that commit's message, and the job
+summary gets one row per commit. One invocation per commit runs every
+selected `commit-msg` hook, whatever `per_hook_runs` says: that input
+shapes the `pre-commit` stage alone. The selection is the same one the
+rest of the run uses, `hooks`, `skip_hooks` and `run_all_hooks` alike;
+each hook runs at the stages it declares. A hook declaring no stages
+runs at the stages `default_stages` lists, no more, or at every stage
+when that key is absent. It runs in both when both appear there, as
+it would locally with both hook types installed:
+`default_stages: [commit-msg]` gives `commit-msg` alone, and
+`default_stages: [pre-commit]`, which this repository's own
+configuration sets, gives `pre-commit` alone.
+
+The action takes the range as an input rather than deriving it from
+the triggering event, which keeps it predictable, testable, and open
+to repositories whose history GitHub does not describe, such as
+Gerrit mirrors. Typical values:
+
+<!-- markdownlint-disable MD013 -->
+
+| Event          | `commit_range`                                                                         |
+| -------------- | -------------------------------------------------------------------------------------- |
+| `pull_request` | `${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}` |
+| `push`         | `${{ github.event.before }}..${{ github.event.after }}`                                |
+| `merge_group`  | `${{ github.event.merge_group.base_sha }}..${{ github.event.merge_group.head_sha }}`   |
+
+<!-- markdownlint-enable MD013 -->
+
+A `push` that creates a branch reports `before` as all zeros, which
+names no commit, so the run refuses it; choose a base for that case,
+or skip it.
+
+Every commit in the range must be present. The action's own checkout
+fetches full history whenever a caller sets `commit_range`; one
+passing `no_checkout: 'true'` must check out with `fetch-depth: 0`
+itself. The action refuses, rather than lints in part:
+
+- a range naming a revision the clone does not hold;
+- a range in a shallow clone whose ends reach a boundary: the walk
+  either stops short without a word or, below a shallow lower end,
+  picks up commits outside the range;
+- a range selecting no commits, such as a reversed one.
+
+`gitlint` will not start without a git identity, and a CI runner
+configures none. Each run sees the identity of the commit's
+**author**, through `GIT_CONFIG_COUNT`, scoped to that one process and
+written nowhere. Entries the caller already set in `GIT_CONFIG_COUNT`
+keep their meaning.
+
+The summary tells "no `commit-msg` hook selected" from "configured
+but not run". With a range and no selected `commit-msg` hook, the
+action issues a notice that it checked no message. Without a range,
+`run_all_hooks` issues one naming each configured hook that the
+`commit-msg` stage alone reaches. Naming such a hook in `hooks`
+without a range fails the run, as above.
+
 ## Security
 
 - No secrets required; `github_token` is optional, and reaches no
@@ -256,6 +335,9 @@ action passes it to prek with `--config`.
 - The action rejects control characters (notably CR/LF) in every
   string input, which closes the per-line anchoring of `grep -E` and
   keeps `GITHUB_OUTPUT` records single-line
+- Each side of `commit_range` is allow-listed to
+  `[A-Za-z0-9][A-Za-z0-9._/~^-]*`, then resolved to a commit id behind
+  `--end-of-options`; from there on git sees those ids alone
 - `path_prefix` stays within the repository workspace, and
   `config_path` within the workspace or `RUNNER_TEMP` (the latter for
   configurations an orchestrating workflow staged); the action
