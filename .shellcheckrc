@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# The test suites source tests/lib/action-step.sh. Follow it even when
+# the hook is handed a suite without the library.
+external-sources=true
+source-path=SCRIPTDIR

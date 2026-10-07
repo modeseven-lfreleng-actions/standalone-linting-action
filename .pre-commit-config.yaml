@@ -37,8 +37,9 @@ repos:
         additional_dependencies: ['pyyaml==6.0.2']
         pass_filenames: false
         # The suite extracts the step from action.yaml, so editing
-        # either file runs it.
-        files: '^(action\.yaml|tests/test-validate-inputs\.sh)$'
+        # either file, or the shared extractor, runs it.
+        # yamllint disable-line rule:line-length
+        files: '^(action\.yaml|tests/(test-validate-inputs|lib/action-step)\.sh)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
