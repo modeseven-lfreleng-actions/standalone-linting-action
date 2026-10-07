@@ -26,6 +26,12 @@
 #     the commit-msg stage, once per commit in the range, against
 #     that commit's message
 #
+# Rust projects (a tracked Cargo.toml under path_prefix): before the
+# hooks run, the action installs the toolchain the project selects
+# if it is missing, and adds rust_components to it, so 'language:
+# system' hooks calling 'cargo fmt' or 'cargo clippy' find them.
+# rust_toolchain_setup turns that off, or on for any project.
+#
 # Security posture:
 #   * No secrets required; an optional github_token is only exported
 #     to hooks that need authenticated API access.
@@ -203,6 +209,26 @@ inputs:
       reads.
     required: false
     default: '0.4.14'
+  rust_toolchain_setup:
+    description: >-
+      Prepare the Rust toolchain before the hooks run: 'auto' when
+      path_prefix holds a tracked Cargo.toml, 'true' for any project,
+      'false' never. Preparation resolves the toolchain the project
+      selects (rust-toolchain.toml, else the rustup default) in the
+      directory prek runs hooks from and in path_prefix, installs it
+      when missing, and adds rust_components to it. A path-based or
+      linked ('rustup toolchain link') toolchain gets a warning and no
+      preparation. Needs rustup: without it 'auto' skips with a
+      notice and 'true' fails.
+    required: false
+    default: 'auto'
+  rust_components:
+    description: >-
+      Space or comma separated rustup components to add to each
+      prepared toolchain. Names must match [A-Za-z0-9][A-Za-z0-9_-]*.
+      Empty installs a missing toolchain without adding components.
+    required: false
+    default: 'rustfmt clippy'
 
 outputs:
   prek_runs:
@@ -229,6 +255,13 @@ outputs:
       nothing to do, and empty when the action refused the selection
       before running it.
     value: ${{ steps.lint.outputs.hooks_run }}
+  rust_toolchains:
+    description: >-
+      Space-separated names of the Rust toolchains the action
+      prepared. Empty when it prepared none: rust_toolchain_setup
+      'false'; 'auto' with no tracked Cargo.toml or no rustup; every
+      selected toolchain path-based or linked; or no hook to run.
+    value: ${{ steps.rust.outputs.toolchains }}
 
 runs:
   using: 'composite'
@@ -260,6 +293,8 @@ runs:
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
         INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
+        INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
+        INPUT_RUST_COMPONENTS: ${{ inputs.rust_components }}
       run: |
         # Validate inputs
         set -euo pipefail
@@ -293,6 +328,7 @@ runs:
         check_clean "$INPUT_PATH_PREFIX" 'path_prefix' || true
         check_clean "$INPUT_BRANCH_NAME" 'branch_name' || true
         check_clean "$INPUT_COMMIT_RANGE" 'commit_range' || true
+        check_clean "$INPUT_RUST_COMPONENTS" 'rust_components' || true
         # Both of these are validated by a line-anchored 'grep'
         # below, so both need this first for the reason given above.
         #
@@ -323,6 +359,27 @@ runs:
           true|false) ;;
           *) err "per_hook_runs must be 'true' or 'false'" ;;
         esac
+        case "$INPUT_RUST_TOOLCHAIN_SETUP" in
+          auto|true|false) ;;
+          *) err "rust_toolchain_setup must be 'auto', 'true' or 'false'" ;;
+        esac
+        # Each component reaches 'rustup component add' behind '--',
+        # and the leading alphanumeric keeps it from reading as an
+        # option should that terminator ever go. Checked whether or
+        # not the project turns out to use Rust, so a bad value fails
+        # here rather than in the first Rust repository to call it.
+        # The message names the input without echoing the value.
+        if [ -n "$INPUT_RUST_COMPONENTS" ]; then
+          component_rule='[A-Za-z0-9][A-Za-z0-9_-]*, up to 64 characters'
+          read -ra rust_components <<< "${INPUT_RUST_COMPONENTS//,/ }"
+          for component in "${rust_components[@]}"; do
+            if ! printf '%s' "$component" |
+              grep -qE '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'; then
+              err "rust_components entries must match $component_rule"
+              break
+            fi
+          done
+        fi
         if [ "$INPUT_RUN_ALL_HOOKS" = 'true' ] && [ -n "$INPUT_HOOKS" ]
         then
           err 'hooks and run_all_hooks are mutually exclusive'
@@ -1207,6 +1264,220 @@ runs:
           echo "no_work_reason=$no_work_reason"
           echo "config_hash=$config_hash"
         } >> "$GITHUB_OUTPUT"
+
+    - name: 'Prepare Rust toolchain'
+      # Located by this id in tests/test-rust-toolchain.sh, which runs
+      # the step on its own against a stand-in rustup.
+      id: rust
+      if: steps.resolve.outputs.run_needed == 'true'
+      shell: bash
+      env:
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
+        INPUT_RUST_COMPONENTS: ${{ inputs.rust_components }}
+      run: |
+        # Prepare Rust toolchain
+        #
+        # pre-commit.ci cannot run cargo, so Rust hooks reach CI here,
+        # as 'language: system' hooks calling the rustup proxies. On a
+        # GitHub-hosted runner those fail for a project pinning a
+        # channel in rust-toolchain.toml without listing components.
+        # Measured with rustup 1.29.1, which the runner image ships
+        # with its profile set to 'minimal':
+        #
+        #   $ cargo fmt --check     # proxy auto-installs 1.85.0
+        #   error: 'cargo-fmt' is not installed for the toolchain
+        #   '1.85.0-x86_64-unknown-linux-gnu'.
+        #
+        # So install the toolchain the project selects, and add the
+        # components the hooks need to THAT toolchain, before prek runs.
+        set -euo pipefail
+        if [ "$INPUT_RUST_TOOLCHAIN_SETUP" = 'false' ]; then
+          echo 'rust_toolchain_setup is false; not preparing Rust 💬'
+          exit 0
+        fi
+        prefix=$(cd -- "$GITHUB_WORKSPACE/$INPUT_PATH_PREFIX" && pwd -P)
+
+        # A Rust project has a TRACKED Cargo.toml under path_prefix:
+        # what git holds is what prek lints, and an untracked build
+        # artefact must not turn a repository into a Rust one. A
+        # directory git does not manage is not one either; prek
+        # refuses to run there regardless.
+        if [ "$INPUT_RUST_TOOLCHAIN_SETUP" = 'auto' ]; then
+          manifests=$(git -C "$prefix" ls-files -- ':(glob)**/Cargo.toml' \
+            2> /dev/null) || manifests=''
+          if [ -z "$manifests" ]; then
+            echo 'No tracked Cargo.toml under path_prefix; not' \
+              'preparing Rust 💬'
+            exit 0
+          fi
+        fi
+
+        rows=''
+        warnings=()
+        prepared=()
+        # Printable characters only, with Markdown's active characters
+        # escaped: rustc output and toolchain paths come from outside
+        # this action and land in table cells and list items.
+        md_escape() {
+          printf '%s' "$1" | tr -cd '[:print:]' |
+            sed 's/[][\\`*_|<>]/\\&/g'
+        }
+        summary() {
+          # $1=outcome line
+          {
+            echo '## 🦀 Rust Toolchain'
+            echo ''
+            echo "$1"
+            if [ -n "$rows" ]; then
+              echo ''
+              echo '| Toolchain | Result |'
+              echo '| --------- | ------ |'
+              printf '%s' "$rows"
+            fi
+            if [ "${#warnings[@]}" -gt 0 ]; then
+              echo ''
+              echo 'Warnings:'
+              echo ''
+              for warning in "${warnings[@]}"; do
+                echo "- $warning"
+              done
+            fi
+            echo ''
+          } >> "$GITHUB_STEP_SUMMARY"
+        }
+        fail() {
+          # $1=stage, the remaining arguments the message
+          local stage="$1"
+          shift
+          echo "::error::$* ❌"
+          summary "❌ Failed at $stage: $(md_escape "$*")"
+          exit 1
+        }
+
+        if ! command -v rustup > /dev/null 2>&1; then
+          if [ "$INPUT_RUST_TOOLCHAIN_SETUP" = 'true' ]; then
+            fail 'setup' "rust_toolchain_setup is 'true' but rustup is" \
+              'not on PATH'
+          fi
+          echo '::notice::rustup is not on PATH; the Rust toolchain' \
+            'was not prepared'
+          outcome='⚠️ Not prepared: rustup is not on PATH, so cargo hooks'
+          summary "$outcome run with the toolchain the runner already has"
+          exit 0
+        fi
+
+        # Never let rustup install a toolchain as a side effect. Asked
+        # with this unset, 'rustup show active-toolchain' installs a
+        # missing one with the minimal profile, warning that the
+        # behaviour is deprecated; with it set, it refuses, so the
+        # install below is explicit and happens once.
+        export RUSTUP_AUTO_INSTALL=0
+
+        # Where the toolchain is chosen. prek runs every hook from the
+        # git top level when given '--config', which the lint step
+        # always passes, so a hook's 'cargo' resolves the toolchain
+        # there. A hook that changes into path_prefix first resolves
+        # it there instead, so prepare both when they differ.
+        dirs=("$prefix")
+        if top=$(git -C "$prefix" rev-parse --show-toplevel 2> /dev/null) &&
+          [ -n "$top" ] && [ "$top" != "$prefix" ]; then
+          dirs=("$top" "$prefix")
+        fi
+
+        # Validated in the validate step.
+        read -ra components <<< "${INPUT_RUST_COMPONENTS//,/ }"
+
+        # Where rustup keeps its toolchains, found as rustup finds it.
+        rustup_home="${RUSTUP_HOME:-${HOME:-}/.rustup}"
+
+        for dir in "${dirs[@]}"; do
+          # Names the toolchain without running it. A missing one is
+          # refused (auto-install is off), and installed here instead:
+          # with no argument, rustup 1.28+ installs the toolchain the
+          # directory selects, components its toolchain file lists
+          # included. Never on a toolchain already present, where it
+          # would sync the channel and could update it mid-run.
+          # rustup before 1.28 predates RUSTUP_AUTO_INSTALL and still
+          # installs a missing toolchain on 'show active-toolchain'
+          # (checked with 1.27.1), so it never reaches this branch.
+          if ! active=$(cd -- "$dir" && rustup show active-toolchain); then
+            echo "Installing the toolchain selected in $dir 💬"
+            if ! (cd -- "$dir" &&
+              rustup toolchain install --no-self-update); then
+              fail 'install' 'could not install the Rust toolchain' \
+                "selected in $dir"
+            fi
+            if ! active=$(cd -- "$dir" &&
+              rustup show active-toolchain); then
+              fail 'resolve' 'could not resolve the Rust toolchain' \
+                "selected in $dir"
+            fi
+          fi
+          # '<name> (<reason>)' on the first line.
+          name="${active%%$'\n'*}"
+          name="${name% (*}"
+          # A path-based toolchain is a directory the repository
+          # names. Adding components to it is not rustup's to do, and
+          # running its rustc would execute whatever lives there.
+          case "$name" in
+            /*)
+              warning="the toolchain selected in $dir is a path; not"
+              warning="$warning preparing it: $name"
+              echo "::warning::$warning"
+              warnings+=("$(md_escape "$warning")")
+              continue
+              ;;
+          esac
+          # The name reaches rustup as an argument and the output as a
+          # single-line record, so hold it to what a toolchain name
+          # can be, starting alphanumeric so it never reads as an
+          # option.
+          if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+            fail 'resolve' "rustup named a toolchain for $dir that" \
+              'this action does not accept'
+          fi
+          # 'rustup toolchain link' makes a symlink in rustup's home.
+          # rustup refuses 'component add' for such a toolchain
+          # ("invalid toolchain name", rustup 1.27.1 and 1.29.1), and
+          # what it holds is for whoever linked it to decide, so leave
+          # it as found, like a path-based one.
+          if [ -L "$rustup_home/toolchains/$name" ]; then
+            warning="the toolchain selected in $dir is linked; not"
+            warning="$warning preparing it: $name"
+            echo "::warning::$warning"
+            warnings+=("$(md_escape "$warning")")
+            continue
+          fi
+          for seen in "${prepared[@]+"${prepared[@]}"}"; do
+            [ "$seen" = "$name" ] && continue 2
+          done
+          prepared+=("$name")
+          # Idempotent and offline when the components are present.
+          if [ "${#components[@]}" -gt 0 ]; then
+            echo "::group::rustup component add --toolchain $name" \
+              "${components[*]}"
+            if ! rustup component add --toolchain "$name" \
+              -- "${components[@]}"; then
+              echo '::endgroup::'
+              fail 'components' 'could not add rust_components to' \
+                "$name"
+            fi
+            echo '::endgroup::'
+          fi
+          if ! version=$(rustup run "$name" rustc --version); then
+            fail 'verify' "rustc does not run from $name"
+          fi
+          rows="$rows| \`$name\` | ✅ $(md_escape "$version") |"$'\n'
+          echo "Rust toolchain ready: $name ($version) ✅"
+        done
+
+        echo "toolchains=${prepared[*]+"${prepared[*]}"}" >> "$GITHUB_OUTPUT"
+        if [ "${#prepared[@]}" -eq 0 ]; then
+          summary '⚠️ Not prepared: the selected toolchain is a path or linked'
+        else
+          summary "✅ Prepared ${#prepared[@]} toolchain(s)"
+        fi
 
     - name: 'Cache prek hook environments'
       if: steps.resolve.outputs.run_needed == 'true'

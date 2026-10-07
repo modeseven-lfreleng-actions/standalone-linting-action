@@ -184,6 +184,16 @@ accept 'a commit_range of names and suffixes' \
 accept 'a commit_range of commit ids' \
     INPUT_COMMIT_RANGE="${zero_digest:0:40}..${zero_digest:0:40}"
 
+accept 'rust_toolchain_setup forced on, components comma separated' \
+    INPUT_RUST_TOOLCHAIN_SETUP='true' \
+    INPUT_RUST_COMPONENTS='rustfmt,clippy, llvm-tools'
+
+accept 'rust_toolchain_setup off, no components' \
+    INPUT_RUST_TOOLCHAIN_SETUP='false' INPUT_RUST_COMPONENTS=''
+
+accept 'a rust_components entry of 64 characters' \
+    INPUT_RUST_COMPONENTS="r$(printf '%063d' 0)"
+
 # --- Refused -----------------------------------------------------------
 
 # One per rejection case in testing.yaml that this step refuses, with
@@ -218,6 +228,30 @@ reject 'glob in skip_hooks' \
 reject 'non-boolean per_hook_runs' \
     "per_hook_runs must be 'true' or 'false'" \
     INPUT_PER_HOOK_RUNS='yes'
+
+reject 'unknown rust_toolchain_setup' \
+    "rust_toolchain_setup must be 'auto', 'true' or 'false'" \
+    INPUT_RUST_TOOLCHAIN_SETUP='yes'
+
+# Each component reaches 'rustup component add' as an argument, so an
+# option-shaped or shell-shaped entry must stop here, anywhere in the
+# list, and so must one longer than any component name.
+rust_component_rule='rust_components entries must match'
+rust_component_rule="${rust_component_rule} [A-Za-z0-9][A-Za-z0-9_-]*,"
+rust_component_rule="${rust_component_rule} up to 64 characters"
+
+reject 'option-shaped rust_components entry' \
+    "${rust_component_rule}" \
+    INPUT_RUST_COMPONENTS='rustfmt --help'
+
+# shellcheck disable=SC2016 # the literal, unexpanded, is the point
+reject 'shell-shaped rust_components entry after a valid one' \
+    "${rust_component_rule}" \
+    INPUT_RUST_COMPONENTS='rustfmt,$(id)'
+
+reject 'over-long rust_components entry' \
+    "${rust_component_rule}" \
+    INPUT_RUST_COMPONENTS="r$(printf '%064d' 0)"
 
 # The two #159 guards. Each input fails without its guard as well --
 # uvx refuses the version, sha256sum the extra digest record -- so
@@ -265,6 +299,10 @@ reject 'commit_range without a range' \
 reject 'multi-line commit_range' \
     'commit_range must not contain control characters' \
     INPUT_COMMIT_RANGE=$'HEAD~1..HEAD\nHEAD~9..HEAD'
+
+reject 'multi-line rust_components' \
+    'rust_components must not contain control characters' \
+    INPUT_RUST_COMPONENTS=$'rustfmt\nclippy'
 
 # --- Result ------------------------------------------------------------
 

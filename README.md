@@ -85,21 +85,23 @@ rather than the commit shown in these examples:
 
 <!-- markdownlint-disable MD013 -->
 
-| Variable Name | Required | Description                                                           | Default |
-| ------------- | -------- | --------------------------------------------------------------------- | ------- |
-| hooks         | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip  |         |
-| skip_hooks    | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |         |
-| run_all_hooks | False    | Run every hook in the configuration (exclusive with hooks)            | false   |
-| per_hook_runs | False    | Invoke prek once per hook, for one summary row each                   | false   |
-| commit_range  | False    | `<from>..<to>`; also run commit-msg hooks on each commit's message    |         |
-| config_path   | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |         |
-| config_url    | False    | HTTPS download URL for the configuration (exclusive with config_path) |         |
-| config_sha256 | False    | Expected SHA-256 of the file fetched from config_url                  |         |
-| path_prefix   | False    | Directory location containing project code                            | .       |
-| branch_name   | False    | Checkout this new Git branch before running linting checks            |         |
-| no_checkout   | False    | Don't perform a checkout of the local repository                      | false   |
-| github_token  | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access   |         |
-| prek_version  | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)        | 0.4.14  |
+| Variable Name        | Required | Description                                                           | Default        |
+| -------------------- | -------- | --------------------------------------------------------------------- | -------------- |
+| hooks                | False    | Space/comma separated hook ids or aliases to run; empty runs ci.skip  |                |
+| skip_hooks           | False    | Space/comma separated hook ids or aliases to EXCLUDE from the run     |                |
+| run_all_hooks        | False    | Run every hook in the configuration (exclusive with hooks)            | false          |
+| per_hook_runs        | False    | Invoke prek once per hook, for one summary row each                   | false          |
+| commit_range         | False    | `<from>..<to>`; also run commit-msg hooks on each commit's message    |                |
+| config_path          | False    | Configuration path; workspace-relative, or absolute in RUNNER_TEMP    |                |
+| config_url           | False    | HTTPS download URL for the configuration (exclusive with config_path) |                |
+| config_sha256        | False    | Expected SHA-256 of the file fetched from config_url                  |                |
+| path_prefix          | False    | Directory location containing project code                            | .              |
+| branch_name          | False    | Checkout this new Git branch before running linting checks            |                |
+| no_checkout          | False    | Don't perform a checkout of the local repository                      | false          |
+| github_token         | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access   |                |
+| prek_version         | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)        | 0.4.14         |
+| rust_toolchain_setup | False    | Prepare the Rust toolchain for cargo hooks: `auto`, `true` or `false` | auto           |
+| rust_components      | False    | Space/comma separated rustup components added to that toolchain       | rustfmt clippy |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -107,11 +109,12 @@ rather than the commit shown in these examples:
 
 <!-- markdownlint-disable MD013 -->
 
-| Output Name | Description                                                                        |
-| ----------- | ---------------------------------------------------------------------------------- |
-| config_file | Resolved path of the linting configuration file                                    |
-| hooks_run   | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
-| prek_runs   | 'prek run' commands issued: 1 combined, one per hook, plus one per commit checked  |
+| Output Name     | Description                                                                        |
+| --------------- | ---------------------------------------------------------------------------------- |
+| config_file     | Resolved path of the linting configuration file                                    |
+| hooks_run       | Space-separated hook names run; 'all' for run_all_hooks; empty on no-op or refusal |
+| prek_runs       | 'prek run' commands issued: 1 combined, one per hook, plus one per commit checked  |
+| rust_toolchains | Space-separated Rust toolchains the action prepared; empty when it prepared none   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -323,6 +326,75 @@ action issues a notice that it checked no message. Without a range,
 `commit-msg` stage alone reaches. Naming such a hook in `hooks`
 without a range fails the run, as above.
 
+### Rust projects
+
+pre-commit.ci has no cargo to call, so Rust checks belong in local
+`language: system` hooks listed under `ci.skip`, which this action
+runs by default:
+
+```yaml
+ci:
+  skip: [cargo-fmt, cargo-clippy]
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        files: '\.rs$|(^|/)Cargo\.(toml|lock)$'
+        pass_filenames: false
+```
+
+An optional `cargo-doc` hook follows the same pattern, with
+`entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps`.
+
+Keep `--workspace` in both. Without it, cargo acts on the root
+package of a workspace alone, so a warning in a member crate
+would pass unnoticed. `--all-targets` widens the targets checked,
+not the packages.
+
+Use `language: system`, not `language: rust`. prek gives a
+`language: rust` hook a toolchain of its own: the latest stable, with
+the minimal profile, in a rustup home of its own. It ignores the
+project's `rust-toolchain.toml`; prek 0.4.14 ran Rust 1.99 for a
+project pinning 1.85.
+
+A `language: system` hook calls the rustup proxies, which honour
+`rust-toolchain.toml`. On a GitHub-hosted runner they fail for a
+project pinning a channel without listing components: the proxy
+installs the channel with the minimal profile, and `cargo fmt` then
+reports that `cargo-fmt` is not installed for it. So before the hooks
+run, the action prepares the toolchain:
+
+- `rust_toolchain_setup: 'auto'` (default) prepares it when
+  `path_prefix` holds a tracked `Cargo.toml`; `'true'` prepares it for
+  any project, and `'false'` never does
+- it asks rustup which toolchain the git top level and `path_prefix`
+  select, since prek runs hooks from the top level and a hook may
+  change into `path_prefix` first
+- it installs a missing toolchain, with the components its toolchain
+  file lists, adds `rust_components` to each toolchain, and checks
+  that `rustc` runs
+- a path-based or linked (`rustup toolchain link`) toolchain gets a
+  warning and no preparation; rustup cannot add components to a
+  linked one
+- without rustup, `'auto'` skips with a notice and `'true'` fails
+
+The action does not read hook entries: in a Rust project it prepares
+the toolchain even when none of the selected hooks call cargo. A hook
+that changes into some other directory resolves a toolchain the
+action did not prepare. The action caches prek's hook environments,
+not cargo's registry or `target/`, so cargo hooks build from scratch
+on every run.
+
 ## Security
 
 - No secrets required; `github_token` is optional, and reaches no
@@ -349,6 +421,12 @@ without a range fails the run, as above.
 - `config_url` must be HTTPS; downloads are size- and time-capped and
   support `config_sha256` integrity pinning
 - prek installs via `uvx` at an exact pinned version
+- Rust preparation turns off rustup's auto-install, installs no
+  toolchain beyond the one the project selects, never self-updates
+  rustup, and runs nothing from a path-based or linked toolchain.
+  Toolchain names must match `[A-Za-z0-9][A-Za-z0-9._+-]*` and
+  `rust_components` entries `[A-Za-z0-9][A-Za-z0-9_-]*`, the latter
+  passed behind `--`
 
 ## Breaking changes from v0.2.x
 
