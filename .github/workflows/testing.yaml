@@ -63,6 +63,21 @@ jobs:
           fi
           echo 'Default mode ran the ci.skip hooks ✅'
 
+      # This repository tracks no Cargo.toml, so the default
+      # rust_toolchain_setup ('auto') must leave Rust alone.
+      - name: 'Check a non-Rust project prepares no Rust toolchain'
+        shell: bash
+        env:
+          RUST_TOOLCHAINS: ${{ steps.default_mode.outputs.rust_toolchains }}
+        run: |
+          # Check a non-Rust project prepares no Rust toolchain
+          if [ -n "$RUST_TOOLCHAINS" ]; then
+            echo 'Error: a non-Rust project prepared Rust toolchains ❌'
+            echo "Got: $RUST_TOOLCHAINS"
+            exit 1
+          fi
+          echo 'No Rust toolchain prepared for a non-Rust project ✅'
+
       # An explicitly named subset of the local configuration
       - name: "Running local action: ${{ github.repository }} [Subset]"
         id: subset
@@ -880,6 +895,60 @@ jobs:
           per_hook_runs: 'yes'
         continue-on-error: true
 
+      # The Rust inputs are validated whether or not the project uses
+      # Rust, so a bad value fails here rather than in the first Rust
+      # repository to call the action.
+      - name: 'Unknown rust_toolchain_setup'
+        id: bad_rust_setup
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          rust_toolchain_setup: 'yes'
+        continue-on-error: true
+
+      - name: 'Option-shaped rust_components entry'
+        id: bad_rust_components
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          rust_components: 'rustfmt --help'
+        continue-on-error: true
+
+      - name: 'Shell-shaped rust_components entry after a valid one'
+        id: shell_rust_components
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          rust_components: 'rustfmt,$(id)'
+        continue-on-error: true
+
+      - name: 'Over-long rust_components entry'
+        id: long_rust_components
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          # yamllint disable-line rule:line-length
+          rust_components: 'r0000000000000000000000000000000000000000000000000000000000000000'
+        continue-on-error: true
+
+      - name: 'Multi-line rust_components'
+        id: multiline_rust_components
+        uses: $/
+        with:
+          no_checkout: true
+          config_path: 'resources/skip-hooks-fixture.yaml'
+          hooks: 'always-passes'
+          rust_components: "rustfmt\nclippy"
+        continue-on-error: true
+
       # A hook id read back OUT of a configuration passes through no
       # allow-list -- prek accepts one spelling a glob. Iterating the
       # listing unquoted expanded it against the checkout, so the
@@ -1129,6 +1198,12 @@ jobs:
           UNKNOWN_PER_HOOK: ${{ steps.unknown_hook_per_hook.outcome }}
           UNKNOWN_PAIR: ${{ steps.unknown_hook_pair.outcome }}
           BAD_PER_HOOK: ${{ steps.bad_per_hook.outcome }}
+          BAD_RUST_SETUP: ${{ steps.bad_rust_setup.outcome }}
+          # yamllint disable-line rule:line-length
+          BAD_RUST_COMPONENTS: ${{ steps.bad_rust_components.outcome }}
+          SHELL_RUST_COMPONENTS: ${{ steps.shell_rust_components.outcome }}
+          LONG_RUST_COMPONENTS: ${{ steps.long_rust_components.outcome }}
+          MULTILINE_RUST: ${{ steps.multiline_rust_components.outcome }}
           # yamllint disable-line rule:line-length
           MULTILINE_PREK: ${{ steps.multiline_prek_version.outcome }}
           MULTILINE_SHA: ${{ steps.multiline_sha256.outcome }}
@@ -1165,6 +1240,11 @@ jobs:
             "unknown hook id in per-hook mode:$UNKNOWN_PER_HOOK" \
             "unknown hook id beside a valid one:$UNKNOWN_PAIR" \
             "non-boolean per_hook_runs:$BAD_PER_HOOK" \
+            "unknown rust_toolchain_setup:$BAD_RUST_SETUP" \
+            "option-shaped rust_components entry:$BAD_RUST_COMPONENTS" \
+            "shell-shaped rust_components entry:$SHELL_RUST_COMPONENTS" \
+            "over-long rust_components entry:$LONG_RUST_COMPONENTS" \
+            "multi-line rust_components:$MULTILINE_RUST" \
             "multi-line prek_version:$MULTILINE_PREK" \
             "multi-line config_sha256:$MULTILINE_SHA" \
             "unreachable stage, single:$UNREACHABLE_ONE" \
@@ -1663,3 +1743,264 @@ jobs:
           done
           [ "$status" -eq 0 ] || exit 1
           echo 'Refused ranges report no hooks run ✅'
+
+  ### Rust: real cargo hooks against generated and published crates ###
+  # A job of its own: it installs Rust toolchains and builds crates,
+  # which the jobs above have no reason to wait for.
+  rust:
+    name: 'Test Rust toolchain preparation'
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Checkout test-rust-project'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'lfreleng-actions/test-rust-project'
+          ref: '5db6f8f6624e676d1d76f8db02a0253fee39900c'  # v0.0.1
+          path: 'test-rust-project'
+          persist-credentials: false
+
+      # Each fixture is a git repository of its own, since the action
+      # asks git which files are tracked and prek runs hooks from the
+      # git top level. Each carries resources/rust-hooks-fixture.yaml
+      # as its .pre-commit-config.yaml, no Cargo.lock (no dependencies;
+      # cargo writes one, untracked), and ignores /target, so a build
+      # leaves nothing for prek to report as modified.
+      #
+      # Nothing here runs cargo inside a fixture: the rustup proxy
+      # would install the toolchain the fixture pins, and the cases
+      # below depend on what is and is not installed.
+      - name: 'Create Rust fixture projects'
+        shell: bash
+        env:
+          FIXTURE_CONFIG: 'resources/rust-hooks-fixture.yaml'
+        run: |
+          # Create Rust fixture projects
+          set -euo pipefail
+          root="$PWD/rust-fixtures"
+          sources=$(mktemp -d)
+          cat > "$sources/clean.rs" << 'RUST'
+          /// Returns the sum of two numbers.
+          pub fn add(left: u64, right: u64) -> u64 {
+              left + right
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn adds() {
+                  assert_eq!(add(2, 2), 4);
+              }
+          }
+          RUST
+          # clippy::len_zero: a warning, which '-D warnings' turns into
+          # a failure. rustfmt has nothing to say about it.
+          cat > "$sources/len-zero.rs" << 'RUST'
+          /// Reports whether a slice holds nothing.
+          pub fn nothing_in(items: &[u8]) -> bool {
+              items.len() == 0
+          }
+          RUST
+
+          # $1=directory $2=source: one library crate, run-unique name
+          crate() {
+            local name
+            name="lfreleng-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            name="$name-$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')"
+            mkdir -p "$1/src"
+            {
+              echo '[package]'
+              echo "name = \"$name\""
+              echo 'version = "0.1.0"'
+              echo 'edition = "2021"'
+              echo 'publish = false'
+            } > "$1/Cargo.toml"
+            cp "$sources/$2.rs" "$1/src/lib.rs"
+          }
+
+          # $1=fixture name $2=source $3=rust-toolchain.toml body or ''
+          # $4=source of a workspace member crate, optional
+          fixture() {
+            local dir="$root/$1"
+            crate "$dir" "$2"
+            if [ -n "${4:-}" ]; then
+              crate "$dir/member" "$4"
+              printf '\n[workspace]\nmembers = ["member"]\n' \
+                >> "$dir/Cargo.toml"
+            fi
+            cp "$FIXTURE_CONFIG" "$dir/.pre-commit-config.yaml"
+            echo '/target' > "$dir/.gitignore"
+            if [ -n "$3" ]; then
+              printf '%s\n' "$3" > "$dir/rust-toolchain.toml"
+            fi
+            git -C "$dir" init -q -b main
+            git -C "$dir" add -A
+            GIT_AUTHOR_NAME='Fixture Author' \
+            GIT_AUTHOR_EMAIL='author@example.com' \
+            GIT_COMMITTER_NAME='Fixture Committer' \
+            GIT_COMMITTER_EMAIL='committer@example.com' \
+              git -C "$dir" -c commit.gpgsign=false commit -q -m 'Seed'
+          }
+
+          # Pinned channels without components: what fails on a runner
+          # unless the action prepares the toolchain.
+          fixture pinned-185 clean $'[toolchain]\nchannel = "1.85.0"'
+          fixture pinned-186 clean $'[toolchain]\nchannel = "1.86.0"'
+          fixture stable clean ''
+          fixture len-zero len-zero ''
+          # A clean root crate, with the warning in a workspace member.
+          fixture workspace clean '' len-zero
+          # A path-based toolchain: the runner's stable, by directory.
+          # Asked from the workspace, which pins nothing.
+          sysroot=$(RUSTUP_AUTO_INSTALL=0 rustup run stable \
+            rustc --print sysroot)
+          fixture path clean "$(printf '[toolchain]\npath = "%s"' \
+            "$sysroot")"
+          rm -r "$sources"
+          echo "Rust fixtures created under $root ✅"
+
+      # Must run FIRST: the rustup proxy leaves 1.85.0 installed with
+      # the minimal profile, which the next case relies on. Without
+      # preparation, 'cargo fmt' finds no cargo-fmt for the pinned
+      # channel. The same fixture passes once prepared, below, so the
+      # failure is the toolchain's and not the code's.
+      - name: 'Rust: pinned channel, preparation off'
+        id: rust_unprepared
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/pinned-185'
+          rust_toolchain_setup: false
+        continue-on-error: true
+
+      # 1.85.0 is now present without rustfmt or clippy: the action
+      # adds the components to it.
+      - name: 'Rust: pinned channel present, components missing'
+        id: rust_components
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/pinned-185'
+
+      # 1.86.0 is absent: the action installs it, then adds components.
+      - name: 'Rust: pinned channel absent'
+        id: rust_install
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/pinned-186'
+
+      - name: 'Rust: no toolchain file, runner default'
+        id: rust_stable
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/stable'
+
+      # Warned about and left alone; the hooks run with it as it is.
+      - name: 'Rust: path-based toolchain'
+        id: rust_path
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/path'
+
+      # A prepared toolchain must not mask a real lint failure.
+      - name: 'Rust: clippy warning'
+        id: rust_clippy
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/len-zero'
+          hooks: 'cargo-clippy'
+        continue-on-error: true
+
+      # A warning in a workspace member must fail the recommended hook
+      # too, though the root crate is clean.
+      - name: 'Rust: clippy warning in a workspace member'
+        id: rust_member
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'rust-fixtures/workspace'
+          hooks: 'cargo-clippy'
+        continue-on-error: true
+
+      # A published crate: library, binary and integration tests.
+      - name: 'Rust: test-rust-project'
+        id: rust_project
+        uses: $/
+        with:
+          no_checkout: true
+          path_prefix: 'test-rust-project'
+          config_path: 'resources/rust-hooks-fixture.yaml'
+
+      - name: 'Check Rust outcomes and prepared toolchains'
+        shell: bash
+        env:
+          UNPREPARED: ${{ steps.rust_unprepared.outcome }}
+          # yamllint disable-line rule:line-length
+          UNPREPARED_RUST: ${{ steps.rust_unprepared.outputs.rust_toolchains }}
+          UNPREPARED_HOOKS: ${{ steps.rust_unprepared.outputs.hooks_run }}
+          COMPONENTS: ${{ steps.rust_components.outputs.rust_toolchains }}
+          INSTALL: ${{ steps.rust_install.outputs.rust_toolchains }}
+          STABLE: ${{ steps.rust_stable.outputs.rust_toolchains }}
+          PATH_RUST: ${{ steps.rust_path.outputs.rust_toolchains }}
+          CLIPPY: ${{ steps.rust_clippy.outcome }}
+          CLIPPY_RUST: ${{ steps.rust_clippy.outputs.rust_toolchains }}
+          CLIPPY_HOOKS: ${{ steps.rust_clippy.outputs.hooks_run }}
+          MEMBER: ${{ steps.rust_member.outcome }}
+          MEMBER_HOOKS: ${{ steps.rust_member.outputs.hooks_run }}
+          PROJECT: ${{ steps.rust_project.outputs.rust_toolchains }}
+        run: |
+          # Check Rust outcomes and prepared toolchains
+          status=0
+          triple='x86_64-unknown-linux-gnu'
+          check() {
+            # $1=description $2=got $3=expected, a glob
+            # shellcheck disable=SC2053 # $3 is a glob on purpose
+            if [[ "$2" == $3 ]]; then
+              echo "$1: '$2' ✅"
+            else
+              echo "Error: $1: got '$2', expected '$3' ❌"
+              status=1
+            fi
+          }
+          check 'unprepared run outcome' "$UNPREPARED" 'failure'
+          check 'unprepared run toolchains' "$UNPREPARED_RUST" ''
+          check 'unprepared run hooks' "$UNPREPARED_HOOKS" '?*'
+          check 'components added' "$COMPONENTS" "1.85.0-$triple"
+          check 'toolchain installed' "$INSTALL" "1.86.0-$triple"
+          check 'runner default' "$STABLE" "stable-$triple"
+          check 'path-based toolchain' "$PATH_RUST" ''
+          check 'clippy warning outcome' "$CLIPPY" 'failure'
+          check 'clippy warning toolchains' "$CLIPPY_RUST" "stable-$triple"
+          check 'clippy warning hooks' "$CLIPPY_HOOKS" 'cargo-clippy'
+          check 'member warning outcome' "$MEMBER" 'failure'
+          check 'member warning hooks' "$MEMBER_HOOKS" 'cargo-clippy'
+          check 'test-rust-project' "$PROJECT" "stable-$triple"
+          [ "$status" -eq 0 ] || exit 1
+          echo 'Rust toolchain preparation behaved as expected ✅'
