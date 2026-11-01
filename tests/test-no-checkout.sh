@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 #
-# Fixtures for the no_checkout refusal in the 'Validate inputs' step
-# of action.yaml.
+# Fixtures for the inputs a caller-prepared tree needs: the
+# no_checkout refusal and the cache_hooks check in the 'Validate
+# inputs' step of action.yaml, and the cache_hooks gate on the
+# 'Cache prek hook environments' step.
 #
 # With no_checkout 'true' the caller prepares the tree, and the step
 # refuses a path_prefix that is not in a git work tree inside the
@@ -56,6 +58,14 @@ case "${known}" in
     *)
         echo "ERROR: the 'validate' step in ${action}" >&2
         echo '       does not read no_checkout.' >&2
+        exit 1
+        ;;
+esac
+case "${known}" in
+    *' INPUT_CACHE_HOOKS '*) ;;
+    *)
+        echo "ERROR: the 'validate' step in ${action}" >&2
+        echo '       does not read cache_hooks.' >&2
         exit 1
         ;;
 esac
@@ -231,6 +241,79 @@ reject 'no_checkout over a workspace root holding no tree' "${nested}" \
 
 reject 'no_checkout in a workspace inside another repository' \
     "${outer}/ws" INPUT_NO_CHECKOUT='true' INPUT_PATH_PREFIX='.'
+
+# --- cache_hooks -------------------------------------------------------
+
+# $1 describes the case, $2 is the workspace, the rest are VAR=VALUE
+# pairs. Matched as a whole line, as for reject.
+reject_cache_hooks() {
+    local desc="$1" ws="$2" line found=0
+    shift 2
+    run_step "${ws}" "$@"
+    while IFS= read -r line; do
+        case "${line}" in
+            "::error::cache_hooks must be 'true' or 'false' ❌") found=1 ;;
+        esac
+    done < "${workdir}/out"
+    if [ "${status}" -eq 1 ] && [ "${found}" -eq 1 ]; then
+        pass "${desc}"
+    else
+        fail "${desc}" 'the cache_hooks refusal'
+    fi
+}
+
+accept "cache_hooks 'false' over a caller tree" "${tree}" \
+    INPUT_NO_CHECKOUT='true' INPUT_PATH_PREFIX='.' \
+    INPUT_CACHE_HOOKS='false'
+
+accept "cache_hooks 'true' over a caller tree" "${tree}" \
+    INPUT_NO_CHECKOUT='true' INPUT_PATH_PREFIX='.' \
+    INPUT_CACHE_HOOKS='true'
+
+# Like the other boolean inputs, only the two exact values pass.
+for value in 'False' 'TRUE' 'no' '0' '' ' false'; do
+    reject_cache_hooks "cache_hooks '${value}'" "${empty}" \
+        INPUT_PATH_PREFIX='.' INPUT_CACHE_HOOKS="${value}"
+done
+
+# The refusal above means nothing if the cache step ignores the
+# input, and only a workflow run can show the step skipping. Check
+# here that the step exists, is actions/cache, and that its 'if'
+# requires cache_hooks to be 'true'.
+status=0
+"${PY_RUN[@]}" - "${action}" > "${workdir}/out" 2>&1 <<'PYEOF' || status=$?
+import re
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    action = yaml.safe_load(handle)
+steps = [
+    step
+    for step in (action.get('runs') or {}).get('steps') or []
+    if isinstance(step, dict)
+    and step.get('name') == 'Cache prek hook environments'
+]
+if len(steps) != 1:
+    sys.exit(f'expected one cache step, found {len(steps)}')
+step = steps[0]
+if not str(step.get('uses', '')).startswith('actions/cache@'):
+    sys.exit(f"the cache step uses {step.get('uses')!r}")
+condition = ' '.join(str(step.get('if', '')).split())
+clauses = [clause.strip() for clause in condition.split('&&')]
+if '||' in condition or not any(
+    re.fullmatch(r"inputs\.cache_hooks\s*==\s*'true'", clause)
+    for clause in clauses
+):
+    sys.exit(f"the cache step's if does not require cache_hooks: "
+             f'{condition!r}')
+PYEOF
+if [ "${status}" -eq 0 ]; then
+    pass 'the cache step requires cache_hooks'
+else
+    fail 'the cache step requires cache_hooks' 'a gated cache step'
+fi
 
 # --- Result ------------------------------------------------------------
 
