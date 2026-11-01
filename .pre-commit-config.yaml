@@ -50,12 +50,13 @@ repos:
         files: '^(action\.yaml|tests/(test-rust-toolchain|lib/action-step)\.sh)$'
       - id: node-project-fixtures
         name: Node.js project step fixtures
-        entry: tests/test-node-project.sh
+        # Through bash: the suite carries no executable bit.
+        entry: bash tests/test-node-project-steps.sh
         language: python
         additional_dependencies: ['pyyaml==6.0.2']
         pass_filenames: false
         # yamllint disable-line rule:line-length
-        files: '^(action\.yaml|tests/(test-node-project|lib/action-step)\.sh)$'
+        files: '^(action\.yaml|tests/(test-node-project-steps|lib/action-step)\.sh)$'
       - id: no-checkout-fixtures
         name: no_checkout step fixtures
         # Through bash: the suite carries no executable bit.
