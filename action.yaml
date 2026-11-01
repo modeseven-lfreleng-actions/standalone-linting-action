@@ -212,12 +212,14 @@ inputs:
     default: 'false'
   cache_hooks:
     description: >-
-      Set 'false' to neither restore nor save prek's hook environments
-      (~/.cache/prek) with actions/cache, so prek builds them afresh.
-      A caller linting an untrusted change in a cache scope that
-      trusted runs share, such as a Gerrit verify dispatched on the
-      default branch, sets this: a saved cache would let the change
-      plant hook environments that those later runs execute.
+      Set 'false' so that no step restores or saves any cache: not
+      prek's hook environments (~/.cache/prek, with actions/cache),
+      and not uv's cache (with astral-sh/setup-uv). prek and uv then
+      build what they need afresh. A caller linting an untrusted
+      change in a cache scope that trusted runs share, such as a
+      Gerrit verify dispatched on the default branch, sets this: a
+      saved cache would let the change plant content that those
+      later runs restore and execute.
     required: false
     default: 'true'
   github_token:
@@ -756,10 +758,14 @@ runs:
         echo "config_file=$target" >> "$GITHUB_OUTPUT"
 
     - name: 'Set up uv'
+      # Located by this name in tests/test-no-checkout.sh, which
+      # checks that cache_hooks gates its cache. 'auto' is setup-uv's
+      # own default, so cache_hooks 'true' keeps its usual behaviour.
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         version: '0.13.4'
+        enable-cache: ${{ inputs.cache_hooks == 'true' && 'auto' || 'false' }}
 
     - name: 'Resolve configuration and hooks'
       id: resolve

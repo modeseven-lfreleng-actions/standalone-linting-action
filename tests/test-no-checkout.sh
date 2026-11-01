@@ -4,8 +4,9 @@
 #
 # Fixtures for the inputs a caller-prepared tree needs: the
 # no_checkout refusal and the cache_hooks check in the 'Validate
-# inputs' step of action.yaml, and the cache_hooks gate on the
-# 'Cache prek hook environments' step.
+# inputs' step of action.yaml, the cache_hooks gate on the 'Cache
+# prek hook environments' step and on the 'Set up uv' cache, and a
+# guard that no other action step restores or saves a cache.
 #
 # With no_checkout 'true' the caller prepares the tree, and the step
 # refuses a path_prefix that is not in a git work tree inside the
@@ -313,6 +314,119 @@ if [ "${status}" -eq 0 ]; then
     pass 'the cache step requires cache_hooks'
 else
     fail 'the cache step requires cache_hooks' 'a gated cache step'
+fi
+
+# setup-uv restores and saves uv's cache unless told not to, so its
+# enable-cache must follow cache_hooks: setup-uv's own 'auto' when
+# the input is 'true', and 'false' otherwise.
+status=0
+"${PY_RUN[@]}" - "${action}" > "${workdir}/out" 2>&1 <<'PYEOF' || status=$?
+import re
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    action = yaml.safe_load(handle)
+steps = [
+    step
+    for step in (action.get('runs') or {}).get('steps') or []
+    if isinstance(step, dict) and step.get('name') == 'Set up uv'
+]
+if len(steps) != 1:
+    sys.exit(f'expected one setup-uv step, found {len(steps)}')
+step = steps[0]
+if not str(step.get('uses', '')).startswith('astral-sh/setup-uv@'):
+    sys.exit(f"the setup-uv step uses {step.get('uses')!r}")
+value = ' '.join(str((step.get('with') or {}).get('enable-cache')).split())
+wanted = re.compile(
+    r"\$\{\{ ?inputs\.cache_hooks ?== ?'true' ?&& ?'auto' ?"
+    r"\|\| ?'false' ?\}\}"
+)
+if not wanted.fullmatch(value):
+    sys.exit(f"setup-uv's enable-cache does not follow cache_hooks: "
+             f'{value!r}')
+PYEOF
+if [ "${status}" -eq 0 ]; then
+    pass "setup-uv's cache follows cache_hooks"
+else
+    fail "setup-uv's cache follows cache_hooks" 'a gated uv cache'
+fi
+
+# cache_hooks 'false' promises that NO step restores or saves a
+# cache. Every 'uses:' step must be one this guard knows, with its
+# cache tied to cache_hooks or switched off, so an action added or
+# reconfigured later cannot reopen the gap silently. An action the
+# guard does not know fails it until someone classifies it here.
+status=0
+"${PY_RUN[@]}" - "${action}" > "${workdir}/out" 2>&1 <<'PYEOF' || status=$?
+import re
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    action = yaml.safe_load(handle)
+
+gated_if = re.compile(r"inputs\.cache_hooks\s*==\s*'true'")
+gated_uv = re.compile(
+    r"\$\{\{ ?inputs\.cache_hooks ?== ?'true' ?&& ?'auto' ?"
+    r"\|\| ?'false' ?\}\}"
+)
+
+
+def if_requires_cache_hooks(step):
+    condition = ' '.join(str(step.get('if', '')).split())
+    if '||' in condition:
+        return False
+    return any(
+        gated_if.fullmatch(clause.strip())
+        for clause in condition.split('&&')
+    )
+
+
+def is_off(value, off):
+    return value is off or str(value).lower() == str(off).lower()
+
+
+problems = []
+for step in (action.get('runs') or {}).get('steps') or []:
+    if not isinstance(step, dict) or 'uses' not in step:
+        continue
+    uses = str(step['uses'])
+    name = step.get('name', uses)
+    action_ref = uses.split('@', 1)[0]
+    inputs = step.get('with') or {}
+    if action_ref == 'actions/checkout':
+        continue
+    if action_ref in ('actions/cache', 'actions/cache/restore',
+                      'actions/cache/save'):
+        if not if_requires_cache_hooks(step):
+            problems.append(f"{name}: {action_ref} not gated by "
+                            f"cache_hooks")
+    elif action_ref == 'astral-sh/setup-uv':
+        value = ' '.join(str(inputs.get('enable-cache')).split())
+        if not (gated_uv.fullmatch(value) or is_off(
+                inputs.get('enable-cache'), False)):
+            problems.append(f'{name}: enable-cache is {value!r}')
+    elif action_ref == 'actions/setup-node':
+        if not is_off(inputs.get('package-manager-cache'), False):
+            problems.append(f'{name}: package-manager-cache is not false')
+        if inputs.get('cache') not in (None, ''):
+            problems.append(f'{name}: cache is {inputs.get("cache")!r}')
+    elif action_ref == 'oven-sh/setup-bun':
+        if not is_off(inputs.get('no-cache'), True):
+            problems.append(f'{name}: no-cache is not true')
+    else:
+        problems.append(f'{name}: {action_ref} is unknown to this guard')
+if problems:
+    sys.exit('\n'.join(problems))
+PYEOF
+if [ "${status}" -eq 0 ]; then
+    pass 'no action step caches outside cache_hooks'
+else
+    fail 'no action step caches outside cache_hooks' \
+        'every caching step tied to cache_hooks or off'
 fi
 
 # --- Result ------------------------------------------------------------
