@@ -2640,6 +2640,7 @@ jobs:
         continue-on-error: true
         with:
           no_checkout: 'true'
+          cache_hooks: 'false'
           path_prefix: 'empty-tree'
           hooks: 'check-yaml'
 
@@ -2704,6 +2705,12 @@ jobs:
         run: |
           # Record the tree state
           set -euo pipefail
+          # Nothing has run hooks yet, so a hook environment found
+          # after the next run was built by prek, not restored.
+          if [ -e "$HOME/.cache/prek" ]; then
+            echo 'Error: ~/.cache/prek exists before any run ❌'
+            exit 1
+          fi
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [ -n "$(git status --porcelain)" ]; then
             echo 'Error: the tree is not clean before the run ❌'
@@ -2716,6 +2723,7 @@ jobs:
         uses: $/
         with:
           no_checkout: 'true'
+          cache_hooks: 'false'
           hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
 
       - name: 'Check the run left the tree alone'
@@ -2747,6 +2755,10 @@ jobs:
             echo "Error: hooks_run is '$HOOKS_RUN' ❌"
             exit 1
           fi
+          if [ ! -d "$HOME/.cache/prek" ]; then
+            echo 'Error: prek built no hook environments ❌'
+            exit 1
+          fi
           echo 'Linted the caller tree in place ✅'
 
       # The same run over a commit planting malformed YAML must fail,
@@ -2768,6 +2780,7 @@ jobs:
         continue-on-error: true
         with:
           no_checkout: 'true'
+          cache_hooks: 'false'
           hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
 
       - name: 'Check the defect failed the run'
@@ -2797,4 +2810,108 @@ jobs:
         uses: $/
         with:
           no_checkout: 'true'
+          cache_hooks: 'false'
           hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
+
+  ### The caller-prepared tree ran without the prek cache ###
+  # A cache step that runs leaves its trace only in the job log: the
+  # restore when it runs, the save in the post step at the end of the
+  # job. So read both jobs' logs once they finish. The 'tests' job runs
+  # with the cache on, so its log must show the cache step; were the
+  # markers below to change, that check fails instead of this one
+  # passing on a log that could never match.
+  caller-tree-cache:
+    name: 'Check the caller-prepared tree skipped the cache'
+    needs: [tests, caller-tree]
+    runs-on: 'ubuntu-24.04'
+    permissions:
+      actions: read # to list this run's jobs and read their logs
+    timeout-minutes: 5
+    steps:
+      - name: 'Check the job logs for the cache step'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          # Check the job logs for the cache step
+          set -euo pipefail
+          logs=$(mktemp -d)
+          run="repos/$REPOSITORY/actions/runs/$RUN_ID"
+          # $1=job name; prints the id of its latest execution. "Re-run
+          # failed jobs" leaves a job that passed in the attempt that
+          # ran it, so walk back from this attempt to the first.
+          find_job() {
+            local attempt id
+            for ((attempt = RUN_ATTEMPT; attempt >= 1; attempt--)); do
+              id=$(gh api --paginate "$run/attempts/$attempt/jobs" \
+                --jq ".jobs[] | select(.name == \"$1\") | .id")
+              [ -n "$id" ] || continue
+              if [ "$(wc -l <<< "$id")" -ne 1 ]; then
+                echo "Error: more than one job named '$1' ❌" >&2
+                return 1
+              fi
+              echo "$id"
+              return 0
+            done
+            echo "Error: no attempt ran a job named '$1' ❌" >&2
+            return 1
+          }
+          # $1=job name $2=log file. The log keeps its ANSI colour
+          # codes, which gh refuses to print without
+          # --allow-escape-sequences; it goes to a file and is only
+          # grepped, then stripped of them so none splits a marker. A
+          # finished job's log can take a moment to appear, so retry
+          # an empty log or a 404 and report any other error.
+          fetch_log() {
+            local id attempt
+            id=$(find_job "$1")
+            for attempt in 1 2 3 4 5 6; do
+              if gh api --allow-escape-sequences \
+                "repos/$REPOSITORY/actions/jobs/$id/logs" \
+                > "$2.raw" 2> "$2.err"; then
+                if [ -s "$2.raw" ]; then
+                  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$2.raw" > "$2"
+                  return 0
+                fi
+              elif ! grep -q 'HTTP 404' "$2.err"; then
+                echo "Error: cannot read the log of '$1' ❌"
+                cat "$2.err"
+                exit 1
+              fi
+              sleep "$((attempt * 5))"
+            done
+            echo "Error: no log for the job '$1' ❌"
+            cat "$2.err"
+            exit 1
+          }
+          fetch_log 'Test local GitHub Action' "$logs/tests.log"
+          fetch_log 'Test a caller-prepared tree' "$logs/caller.log"
+
+          # actions/cache's restore, miss, save and hit messages, held
+          # to the prek- key: setup-uv logs the same messages for its
+          # own setup-uv- cache, which cache_hooks does not control.
+          markers='Cache restored from key: prek-'
+          markers="$markers|Cache not found for input keys: prek-"
+          markers="$markers|Cache saved with key: prek-"
+          markers="$markers|Cache hit occurred on [a-z ]*key:? prek-"
+          if ! grep -qE "$markers" "$logs/tests.log"; then
+            echo 'Error: the tests job log shows no cache step ❌'
+            echo '       The markers this check reads may have changed.'
+            exit 1
+          fi
+          if ! grep -qF 'Linted the caller tree in place' \
+            "$logs/caller.log"; then
+            echo 'Error: the caller-tree log is not the one expected ❌'
+            exit 1
+          fi
+          # The prek cache step is the action's only actions/cache
+          # step, so its header counts too: it shows the step ran even
+          # where the restore logged nothing above.
+          if grep -E "$markers|Run actions/cache@" "$logs/caller.log"; then
+            echo 'Error: the caller-tree job ran the prek cache ❌'
+            exit 1
+          fi
+          echo 'The caller-prepared tree neither restored nor saved ✅'

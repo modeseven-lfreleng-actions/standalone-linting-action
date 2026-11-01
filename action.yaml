@@ -210,6 +210,16 @@ inputs:
       top level is in the workspace, or the action fails.
     required: false
     default: 'false'
+  cache_hooks:
+    description: >-
+      Set 'false' to neither restore nor save prek's hook environments
+      (~/.cache/prek) with actions/cache, so prek builds them afresh.
+      A caller linting an untrusted change in a cache scope that
+      trusted runs share, such as a Gerrit verify dispatched on the
+      default branch, sets this: a saved cache would let the change
+      plant hook environments that those later runs execute.
+    required: false
+    default: 'true'
   github_token:
     description: >-
       Optional token exported to hooks as GITHUB_TOKEN/GH_TOKEN, for
@@ -358,6 +368,7 @@ runs:
         INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
         INPUT_BRANCH_NAME: ${{ inputs.branch_name }}
         INPUT_NO_CHECKOUT: ${{ inputs.no_checkout }}
+        INPUT_CACHE_HOOKS: ${{ inputs.cache_hooks }}
         INPUT_PREK_VERSION: ${{ inputs.prek_version }}
         INPUT_COMMIT_RANGE: ${{ inputs.commit_range }}
         INPUT_RUST_TOOLCHAIN_SETUP: ${{ inputs.rust_toolchain_setup }}
@@ -458,6 +469,14 @@ runs:
         case "$INPUT_NODE_INSTALL_SCRIPTS" in
           true|false) ;;
           *) err "node_install_scripts must be 'true' or 'false'" ;;
+        esac
+        # Checked rather than read loosely later: the cache step runs
+        # only for 'true', compared case-insensitively, so a typo
+        # would quietly turn the cache off and 'TRUE' would pass for
+        # 'true'. Hold it to the two exact values.
+        case "$INPUT_CACHE_HOOKS" in
+          true|false) ;;
+          *) err "cache_hooks must be 'true' or 'false'" ;;
         esac
         # node_version reaches actions/setup-node as an input, never a
         # shell. Held to plain versions and setup-node's aliases: a
@@ -2102,7 +2121,11 @@ runs:
         echo "Dependencies installed from $PLAN_LOCKFILE ✅"
 
     - name: 'Cache prek hook environments'
-      if: steps.resolve.outputs.run_needed == 'true'
+      # Located by this name in tests/test-no-checkout.sh, which
+      # checks that cache_hooks gates it.
+      if: >-
+        steps.resolve.outputs.run_needed == 'true' &&
+        inputs.cache_hooks == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/prek
