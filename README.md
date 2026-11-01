@@ -98,6 +98,7 @@ rather than the commit shown in these examples:
 | path_prefix          | False    | Directory location containing project code                             | .              |
 | branch_name          | False    | Checkout this new Git branch before running linting checks             |                |
 | no_checkout          | False    | Lint the tree the caller prepared at path_prefix; skip the checkout    | false          |
+| cache_hooks          | False    | Restore and save prek's hook environments with `actions/cache`         | true           |
 | github_token         | False    | Token exported as GITHUB_TOKEN/GH_TOKEN to hooks needing API access    |                |
 | prek_version         | False    | Version of prek used to run the hooks (X.Y.Z, 0.2.20 or newer)         | 0.4.14         |
 | rust_toolchain_setup | False    | Prepare the Rust toolchain for cargo hooks: `auto`, `true` or `false`  | auto           |
@@ -349,12 +350,27 @@ With `no_checkout: 'true'` the caller owns:
 - credentials. Hooks run the tree's own code, so a caller linting an
   untrusted change checks out with `persist-credentials: false`, or
   removes persisted credentials first, and passes no `github_token`.
+- the hook cache. By default the action restores and saves
+  `~/.cache/prek` under keys shared by every run in the cache scope.
+  A caller linting an untrusted change in a scope that trusted runs
+  share, such as a Gerrit verify, sets `cache_hooks: 'false'`, so the
+  action neither restores nor saves it and prek builds the hook
+  environments afresh.
 
 `checkout-gerrit-change-action` persists its token and offers no way
 to turn that off, so a Gerrit caller removes it before linting, as
-the `tox-verify.yaml` workflow in `generic-workflows` does. The
-refusal of a missing tree is newer than the release these examples
-pin, so pin one that includes it:
+the `tox-verify.yaml` workflow in `generic-workflows` does.
+
+A Gerrit verify also turns off the hook cache. `gerrit_to_platform`
+dispatches it with `workflow_dispatch` on the default branch, so its
+cache scope is the one that branch's trusted runs restore from. With
+the cache on, a change could plant hook environments in it that a
+later trusted run, such as a push-triggered lint holding a token,
+would execute. Removing the checkout credentials does not prevent
+that.
+
+The refusal of a missing tree and `cache_hooks` are newer than the
+release these examples pin, so pin one that includes them:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -392,6 +408,8 @@ pin, so pin one that includes it:
       - uses: lfreleng-actions/standalone-linting-action@760ff830dcccde04ca780cd2a7ca36e79ebbd530 # v0.4.1
         with:
           no_checkout: 'true'
+          # An unmerged change in the default branch's cache scope
+          cache_hooks: 'false'
           run_all_hooks: 'true'
 ```
 
@@ -622,6 +640,10 @@ the dependencies afresh.
   `setup-node` alias, never a range. `packageManager` must be
   `<npm|yarn|pnpm|bun>@<x.y.z>`. The action restores no dependency
   cache, so nothing a pull request primed can reach a later run
+- `cache_hooks: 'false'` keeps the prek hook cache out of the run
+  entirely, for a caller linting an untrusted change in a cache scope
+  that trusted runs share (see
+  [Caller-prepared trees](#caller-prepared-trees))
 
 ## Breaking changes from v0.2.x
 
