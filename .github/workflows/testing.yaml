@@ -2813,7 +2813,7 @@ jobs:
           cache_hooks: 'false'
           hooks: 'check-yaml, end-of-file-fixer, trailing-whitespace'
 
-  ### The caller-prepared tree ran without the prek cache ###
+  ### The caller-prepared tree ran without the prek or uv cache ###
   # A cache step that runs leaves its trace only in the job log: the
   # restore when it runs, the save in the post step at the end of the
   # job. So read both jobs' logs once they finish. The 'tests' job runs
@@ -2892,7 +2892,7 @@ jobs:
 
           # actions/cache's restore, miss, save and hit messages, held
           # to the prek- key: setup-uv logs the same messages for its
-          # own setup-uv- cache, which cache_hooks does not control.
+          # own setup-uv- cache, which the check below reads.
           markers='Cache restored from key: prek-'
           markers="$markers|Cache not found for input keys: prek-"
           markers="$markers|Cache saved with key: prek-"
@@ -2912,6 +2912,20 @@ jobs:
           # where the restore logged nothing above.
           if grep -E "$markers|Run actions/cache@" "$logs/caller.log"; then
             echo 'Error: the caller-tree job ran the prek cache ❌'
+            exit 1
+          fi
+
+          # setup-uv's own cache, which cache_hooks also controls: any
+          # restore, miss, save or hit names its setup-uv- key. The
+          # tests job runs with the cache on, so it must show one.
+          uv_markers='keys?:? setup-uv-'
+          if ! grep -qiE "$uv_markers" "$logs/tests.log"; then
+            echo 'Error: the tests job log shows no setup-uv cache ❌'
+            echo '       The markers this check reads may have changed.'
+            exit 1
+          fi
+          if grep -iE "$uv_markers" "$logs/caller.log"; then
+            echo 'Error: the caller-tree job ran the uv cache ❌'
             exit 1
           fi
           echo 'The caller-prepared tree neither restored nor saved ✅'
